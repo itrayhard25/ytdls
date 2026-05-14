@@ -1,172 +1,222 @@
-name: Download and Split for User
+name: YouTube Download for Youtopia
 
 on:
   workflow_dispatch:
     inputs:
-      file_url:
-        description: 'لینک مستقیم فایل (در صورت وجود)'
-        required: false
-        type: string
-      file_id:
-        description: 'شناسه فایل تلگرام (در صورت آپلود مستقیم)'
-        required: false
+      youtube_url:
+        description: 'لینک ویدیوی یوتیوب'
+        required: true
         type: string
       zip_password:
-        description: 'رمز عبور ZIP'
+        description: 'رمز فایل فشرده'
         required: true
         type: string
       user_id:
-        description: 'شناسه کاربر'
+        description: 'شناسه کاربر تلگرام'
         required: true
+        type: string
+      max_size_mb:
+        description: 'حداکثر حجم فایل (مگابایت) برای انتخاب کیفیت'
+        required: false
+        default: '2048'
+        type: string
+      worker_url:
+        description: 'آدرس Cloudflare Worker یوتیوپیا'
+        required: false
+        default: 'https://your-youtopia-worker.workers.dev'
         type: string
 
 permissions:
   contents: write
 
 jobs:
-  process:
+  download:
     runs-on: ubuntu-latest
     steps:
-      - name: Notify Worker that job started
+      - name: Notify Worker - شروع کار
         run: |
-          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/started" \
+          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-started" \
             -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\"}"
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\"}" || true
 
-      - name: Optimized Checkout (fast)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Install Dependencies
+      - name: نصب ابزارهای مورد نیاز
         run: |
-          sudo apt-get update && sudo apt-get install -y p7zip-full
-          pip install pyrogram tgcrypto
+          sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full ffmpeg
+          pip install yt-dlp --quiet
+          echo "✅ ابزارها نصب شدند"
 
-      - name: Download file (Link OR Telegram File ID)
+      - name: بررسی کیفیت مناسب بر اساس محدودیت حجم
+        id: quality
         env:
-          TG_API_ID: ${{ secrets.TG_API_ID }}
-          TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          TG_SESSION_STRING: ${{ secrets.TG_SESSION_STRING }}
-          INPUT_FILE_URL: ${{ github.event.inputs.file_url }}
-          INPUT_FILE_ID: ${{ github.event.inputs.file_id }}
+          YT_URL: ${{ github.event.inputs.youtube_url }}
+          MAX_SIZE_MB: ${{ github.event.inputs.max_size_mb }}
         run: |
-          if [ -n "$INPUT_FILE_URL" ] && [ "$INPUT_FILE_URL" != "null" ] && [ "$INPUT_FILE_URL" != "" ]; then
-            echo "🌐 Using HTTP Link download..."
-            ORIGINAL_NAME=$(basename "$INPUT_FILE_URL" | cut -d '?' -f1)
-            [ -z "$ORIGINAL_NAME" ] && ORIGINAL_NAME="downloaded_file"
-            echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
-            wget -c -t 20 -T 60 --retry-connrefused --waitretry=5 -O "$ORIGINAL_NAME" "$INPUT_FILE_URL"
-          elif [ -n "$INPUT_FILE_ID" ] && [ "$INPUT_FILE_ID" != "null" ] && [ "$INPUT_FILE_ID" != "" ]; then
-            echo "🚀 Using Direct Telegram Download via MTProto..."
-            cat << 'EOF' > dl_script.py
-          import os, asyncio
-          from pyrogram import Client
+          echo "🔍 بررسی فرمت‌های موجود..."
+          
+          # دریافت اطلاعات فرمت‌ها
+          FORMAT_INFO=$(yt-dlp --list-formats "$YT_URL" 2>&1 || echo "ERROR")
+          if echo "$FORMAT_INFO" | grep -q "ERROR"; then
+            echo "❌ خطا در دریافت اطلاعات ویدیو"
+            echo "selected_quality=480" >> $GITHUB_ENV
+            exit 0
+          fi
+          
+          MAX_BYTES=$((${MAX_SIZE_MB:-2048} * 1024 * 1024))
+          
+          # تلاش برای کیفیت‌های مختلف از بالا به پایین (حداکثر 720p)
+          for QUALITY in 720 480 360 240 144; do
+            echo "⚙️ بررسی کیفیت ${QUALITY}p..."
+            SIZE_INFO=$(yt-dlp --format "bestvideo[height<=${QUALITY}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${QUALITY}][ext=mp4]/best[height<=${QUALITY}]" \
+              --print "%(filesize,filesize_approx)s" \
+              "$YT_URL" 2>/dev/null || echo "0")
+            
+            FILE_SIZE=$(echo "$SIZE_INFO" | head -1 | tr -d '[:space:]')
+            if [ -z "$FILE_SIZE" ] || [ "$FILE_SIZE" = "NA" ] || [ "$FILE_SIZE" = "None" ]; then
+              FILE_SIZE=0
+            fi
+            
+            echo "   حجم تخمینی ${QUALITY}p: $FILE_SIZE بایت"
+            
+            if [ "$FILE_SIZE" -eq 0 ] || [ "$FILE_SIZE" -le "$MAX_BYTES" ]; then
+              echo "✅ کیفیت ${QUALITY}p انتخاب شد (حجم: $FILE_SIZE بایت)"
+              echo "selected_quality=$QUALITY" >> $GITHUB_ENV
+              break
+            fi
+          done
+          
+          # اگر هیچ کیفیتی انتخاب نشد، از پایین‌ترین استفاده کن
+          if [ -z "${{ env.selected_quality }}" ]; then
+            echo "selected_quality=360" >> $GITHUB_ENV
+          fi
 
-          async def main():
-              api_id = int(os.environ['TG_API_ID'])
-              api_hash = os.environ['TG_API_HASH']
-              session_string = os.environ['TG_SESSION_STRING']
-              file_id = os.environ['INPUT_FILE_ID']
-              
-              app = Client("my_bot_session", session_string=session_string, api_id=api_id, api_hash=api_hash)
-              async with app:
-                  print("Connected directly to Telegram via Session String! Downloading file...")
-                  file_path = await app.download_media(file_id)
-                  if file_path:
-                      print(f"Downloaded successfully to: {file_path}")
-                      with open("filename.txt", "w") as f:
-                          f.write(file_path)
-                  else:
-                      print("❌ Download failed via Pyrogram!")
-                      exit(1)
+      - name: Notify Worker - شروع دانلود
+        run: |
+          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"download\",\"percent\":0}" || true
 
-          asyncio.run(main())
-          EOF
-            python dl_script.py
-            ORIGINAL_NAME=$(cat filename.txt)
-            echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
-          else
-            echo "❌ No file_url or file_id provided!"
+      - name: دانلود ویدیوی یوتیوب
+        env:
+          YT_URL: ${{ github.event.inputs.youtube_url }}
+          SELECTED_QUALITY: ${{ env.selected_quality }}
+        run: |
+          echo "🎬 دانلود با کیفیت ${SELECTED_QUALITY}p..."
+          
+          yt-dlp \
+            --format "bestvideo[height<=${SELECTED_QUALITY}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${SELECTED_QUALITY}][ext=mp4]/best[height<=${SELECTED_QUALITY}]" \
+            --merge-output-format mp4 \
+            --output "video.%(ext)s" \
+            --no-playlist \
+            --restrict-filenames \
+            --retries 5 \
+            --fragment-retries 5 \
+            --retry-sleep 5 \
+            "$YT_URL"
+          
+          VIDEO_FILE=$(ls video.* 2>/dev/null | head -1)
+          if [ -z "$VIDEO_FILE" ]; then
+            echo "❌ فایل ویدیو یافت نشد!"
             exit 1
           fi
           
-          if [ ! -s "${ORIGINAL_NAME:-downloaded_file}" ]; then
-            echo "❌ Downloaded file is empty or missing!"
-            exit 1
-          fi
-          echo "✅ Download completed successfully"
+          FILE_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
+          echo "✅ دانلود کامل شد: $VIDEO_FILE ($(( FILE_SIZE / 1024 / 1024 )) MB)"
+          echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
+          echo "VIDEO_SIZE=$FILE_SIZE" >> $GITHUB_ENV
 
-      - name: Create archive chunks (95MB each)
+      - name: Notify Worker - شروع فشرده‌سازی
         run: |
-          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v95m "archive.7z" "${{ env.ORIGINAL_NAME }}"
+          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"compress\",\"percent\":50}" || true
 
-      - name: Clean up original file
-        run: rm -f "${{ env.ORIGINAL_NAME }}"
+      - name: فشرده‌سازی با رمز
+        run: |
+          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=1 -v95m "archive.7z" "${{ env.VIDEO_FILE }}"
+          echo "✅ فشرده‌سازی کامل شد"
 
-      - name: Configure git
+      - name: حذف فایل اصلی
+        run: rm -f "${{ env.VIDEO_FILE }}"
+
+      - name: پیکربندی git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Get total chunks count
-        id: chunks
+      - name: Notify Worker - شروع آپلود
         run: |
-          CHUNKS=$(ls archive.7z.* 2>/dev/null | wc -l)
-          echo "total_chunks=$CHUNKS" >> $GITHUB_OUTPUT
-
-      - name: Notify Worker about total chunks
-        run: |
-          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/progress" \
+          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
             -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"total_chunks\":${{ steps.chunks.outputs.total_chunks }}}"
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"upload\",\"percent\":70}" || true
 
-      - name: Create user branch
+      - name: ایجاد branch و آپلود
+        id: upload
         run: |
-          BRANCH_NAME="user_${{ github.event.inputs.user_id }}_$(date +%s)"
+          BRANCH_NAME="yt_${{ github.event.inputs.user_id }}_$(date +%s)"
           git checkout --orphan "$BRANCH_NAME"
           git rm -rf . 2>/dev/null || true
-          echo "# Files for user ${{ github.event.inputs.user_id }}" > README.md
+          
+          echo "# YouTube Download for user ${{ github.event.inputs.user_id }}" > README.md
+          
           chunks=(archive.7z.*)
           total=${#chunks[@]}
+          
+          if [ $total -eq 0 ]; then
+            # فایل کوچک‌تر از ۹۵ مگابایت - بدون تقسیم
+            chunks=(archive.7z)
+            total=1
+          fi
+          
           batch_size=2
           start=0
-          uploaded=0
+          
           while [ $start -lt $total ]; do
             end=$((start + batch_size - 1))
             [ $end -ge $total ] && end=$((total - 1))
             for i in $(seq $start $end); do
-              git add "${chunks[$i]}"
+              git add "${chunks[$i]}" 2>/dev/null || true
             done
             git add README.md
             git commit -m "Add chunks $((start+1))-$((end+1)) of $total"
             for attempt in {1..5}; do
               if git push origin "$BRANCH_NAME"; then
-                echo "Push successful for chunks $((start+1))-$((end+1))"
-                uploaded=$((end+1))
+                echo "Push موفق"
                 break
               else
-                echo "Push failed (attempt $attempt), retrying in 10 seconds..."
+                echo "تلاش $attempt ناموفق - انتظار..."
                 sleep 10
               fi
             done
-            curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/progress" \
+            
+            PERCENT=$((70 + (end + 1) * 30 / total))
+            curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
               -H "Content-Type: application/json" \
-              -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"uploaded_chunks\":$uploaded}"
+              -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"upload\",\"percent\":$PERCENT}" || true
+            
             start=$((end + 1))
             sleep 2
           done
+          
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
 
-      - name: Notify Worker that job is done
+      - name: اطلاع‌رسانی موفقیت به Worker
         run: |
-          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/complete" \
+          REPO_JSON=$(cat <<'ENDJSON'
+          {"owner":"${{ github.repository_owner }}","repo":"${{ github.event.repository.name }}"}
+          ENDJSON
+          )
+          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-complete" \
             -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"branch\":\"${{ env.BRANCH_NAME }}\"}"
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"branch\":\"${{ env.BRANCH_NAME }}\",\"repo_info\":\"{\\\"owner\\\":\\\"${{ github.repository_owner }}\\\",\\\"repo\\\":\\\"${{ github.event.repository.name }}\\\"}\"}"
 
-      - name: Notify Worker on failure
+      - name: اطلاع‌رسانی خطا به Worker
         if: failure()
         run: |
-          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/failed" \
+          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-failed" \
             -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"error\":\"Workflow failed\"}"
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"error\":\"Workflow failed\"}"
