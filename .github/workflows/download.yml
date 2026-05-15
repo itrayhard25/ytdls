@@ -80,7 +80,8 @@ jobs:
           echo "🔍 بررسی فرمت‌های موجود..."
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
-          YTDL_OPTIONS="--extractor-args \"youtubepot-bgutilhttp:base_url=http://localhost:4416\" --js-runtimes node --remote-components ejs:npm"
+          # اصلاح: استفاده از فرمت صحیح extractor-args
+          YTDL_OPTIONS="--extractor-args \"youtube:pot-provider=bgutil:http\" --js-runtimes node --remote-components ejs:npm"
           FORMAT_INFO=$(yt-dlp $COOKIE_ARG $YTDL_OPTIONS --list-formats "$YT_URL" 2>&1 || echo "ERROR")
           if echo "$FORMAT_INFO" | grep -q "ERROR"; then
             echo "❌ خطا در دریافت اطلاعات ویدیو"
@@ -123,7 +124,8 @@ jobs:
           echo "🎬 دانلود با کیفیت ${SELECTED_QUALITY}p..."
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
-          YTDL_OPTIONS="--extractor-args \"youtubepot-bgutilhttp:base_url=http://localhost:4416\" --js-runtimes node --remote-components ejs:npm"
+          # اصلاح: فرمت صحیح
+          YTDL_OPTIONS="--extractor-args \"youtube:pot-provider=bgutil:http\" --js-runtimes node --remote-components ejs:npm"
           yt-dlp \
             $COOKIE_ARG \
             $YTDL_OPTIONS \
@@ -146,6 +148,7 @@ jobs:
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
         shell: bash
 
+      # ادامه مراحل بدون تغییر...
       - name: Notify Worker - شروع فشرده‌سازی
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
