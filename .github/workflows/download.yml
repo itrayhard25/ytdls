@@ -33,69 +33,39 @@ jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      - name: Notify Worker - شروع کار
+      # 1. اعلان شروع کار به Worker
+      - name: Notify Worker - Job Started
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-started" \
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\"}" || true
 
-      - name: Checkout
+      # 2. دریافت سورس کد
+      - name: Checkout Repository
         uses: actions/checkout@v4
+
+      # 3. نصب و راه‌اندازی خودکار yt-dlp با تمام ابزارهای مورد نیاز
+      - name: Setup yt-dlp & FFmpeg & JS Runtime
+        uses: AnimMouse/setup-yt-dlp@v3
+
+      # 4. تنظیم و بارگذاری خودکار کوکی‌ها (در صورت وجود در Secrets)
+      - name: Setup YouTube Cookies
+        uses: AnimMouse/setup-yt-dlp/cookies@v3
         with:
-          fetch-depth: 1
+          cookies: ${{ secrets.YOUTUBE_COOKIES }}
 
-      # --- نصب yt-dlp، Deno و اطمینان از وجود ffmpeg ---
-      - name: نصب yt-dlp، Deno و بررسی ffmpeg
-        run: |
-          # نصب Deno
-          curl -fsSL https://deno.land/install.sh | sh
-          echo "$HOME/.deno/bin" >> $GITHUB_PATH
-          
-          # نصب yt-dlp
-          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-          sudo chmod a+rx /usr/local/bin/yt-dlp
-          
-          # اطمینان از وجود ffmpeg (در صورت نبود، نصب سریع)
-          if ! command -v ffmpeg &> /dev/null; then
-            echo "ffmpeg پیدا نشد، در حال نصب..."
-            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-          else
-            echo "ffmpeg از قبل نصب است."
-          fi
-          
-          echo "✅ همه ابزارها حاضرند"
-        shell: bash
-
-      # --- ایجاد فایل کوکی از Secret ---
-      - name: ایجاد فایل کوکی برای yt-dlp
-        env:
-          COOKIE_BASE64: ${{ secrets.YT_COOKIES }}
-        run: |
-          if [ -z "$COOKIE_BASE64" ]; then
-            echo "⚠️ هشدار: Secret مربوط به کوکی (YT_COOKIES) تنظیم نشده!"
-            echo "بدون کوکی ادامه می‌دهیم ولی احتمال خطای احراز هویت وجود دارد."
-          else
-            echo "$COOKIE_BASE64" | base64 -d > cookies.txt
-            echo "✅ فایل کوکی ساخته شد"
-          fi
-        shell: bash
-
-      - name: بررسی کیفیت مناسب بر اساس محدودیت حجم
+      # 5. بررسی کیفیت مناسب بر اساس محدودیت حجم
+      - name: Select Video Quality Based on Size Limit
         id: quality
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           MAX_SIZE_MB: ${{ github.event.inputs.max_size_mb }}
         run: |
-          echo "🔍 بررسی فرمت‌های موجود..."
+          echo "🔍 در حال بررسی فرمت‌های موجود..."
           
-          COOKIE_ARG=""
-          [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
-          
-          YTDL_OPTIONS="--js-runtimes deno --remote-components ejs:npm"
-          
-          FORMAT_INFO=$(yt-dlp $COOKIE_ARG $YTDL_OPTIONS --list-formats "$YT_URL" 2>&1 || echo "ERROR")
+          FORMAT_INFO=$(yt-dlp --list-formats "$YT_URL" 2>&1 || echo "ERROR")
           if echo "$FORMAT_INFO" | grep -q "ERROR"; then
-            echo "❌ خطا در دریافت اطلاعات ویدیو"
+            echo "❌ خطا در دریافت اطلاعات ویدیو. کیفیت 480p انتخاب شد."
             echo "selected_quality=480" >> $GITHUB_ENV
             exit 0
           fi
@@ -103,9 +73,8 @@ jobs:
           MAX_BYTES=$((${MAX_SIZE_MB:-2048} * 1024 * 1024))
           
           for QUALITY in 720 480 360 240 144; do
-            echo "⚙️ بررسی کیفیت ${QUALITY}p..."
-            # *** تغییر: فرمت ساده و انعطاف‌پذیر بدون پسوند اجباری ***
-            SIZE_INFO=$(yt-dlp $COOKIE_ARG $YTDL_OPTIONS --format "bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]" \
+            echo "⚙️ در حال بررسی کیفیت ${QUALITY}p..."
+            SIZE_INFO=$(yt-dlp --format "bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]" \
               --print "%(filesize,filesize_approx)s" \
               "$YT_URL" 2>/dev/null || echo "0")
             
@@ -128,33 +97,19 @@ jobs:
           fi
         shell: bash
 
-      - name: Notify Worker - شروع دانلود
-        run: |
-          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
-            -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"download\",\"percent\":0}" || true
-
-      - name: دانلود ویدیوی یوتیوب
+      # 6. دانلود ویدیو با بهترین فرمت صدا و تصویر
+      - name: Download YouTube Video
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           SELECTED_QUALITY: ${{ env.selected_quality }}
         run: |
           echo "🎬 دانلود با کیفیت ${SELECTED_QUALITY}p..."
           
-          COOKIE_ARG=""
-          [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
-          
-          YTDL_OPTIONS="--js-runtimes deno --remote-components ejs:npm"
-          
-          # *** اصلاحیه: فرمت استاندارد که همیشه ویدیو+صدا را ادغام می‌کند ***
           yt-dlp \
-            $COOKIE_ARG \
-            $YTDL_OPTIONS \
             --format "bestvideo[height<=${SELECTED_QUALITY}]+bestaudio/best[height<=${SELECTED_QUALITY}]" \
             --merge-output-format mp4 \
             --output "video.%(ext)s" \
             --no-playlist \
-            --restrict-filenames \
             --retries 5 \
             --fragment-retries 5 \
             --retry-sleep 5 \
@@ -172,33 +127,24 @@ jobs:
           echo "VIDEO_SIZE=$FILE_SIZE" >> $GITHUB_ENV
         shell: bash
 
-      # --- ادامه مراحل (بدون تغییر) ---
-      - name: Notify Worker - شروع فشرده‌سازی
-        run: |
-          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
-            -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"compress\",\"percent\":50}" || true
-
-      - name: فشرده‌سازی با رمز
+      # 7. فشرده‌سازی فایل نهایی با رمز
+      - name: Compress Video with Password
         run: |
           7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=1 -v95m "archive.7z" "${{ env.VIDEO_FILE }}"
           echo "✅ فشرده‌سازی کامل شد"
 
-      - name: حذف فایل اصلی
+      # 8. حذف فایل اصلی برای ذخیره‌سازی بهتر
+      - name: Remove Original Video File
         run: rm -f "${{ env.VIDEO_FILE }}"
 
-      - name: پیکربندی git
+      # 9. پیکربندی Git
+      - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Notify Worker - شروع آپلود
-        run: |
-          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
-            -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"upload\",\"percent\":70}" || true
-
-      - name: ایجاد branch و آپلود
+      # 10. ایجاد یک شاخه‌ی جدید و آپلود قطعات فایل فشرده
+      - name: Create Branch & Upload Chunks
         id: upload
         run: |
           BRANCH_NAME="yt_${{ github.event.inputs.user_id }}_$(date +%s)"
@@ -228,10 +174,10 @@ jobs:
             git commit -m "Add chunks $((start+1))-$((end+1)) of $total"
             for attempt in {1..5}; do
               if git push origin "$BRANCH_NAME"; then
-                echo "Push موفق"
+                echo "Push successful"
                 break
               else
-                echo "تلاش $attempt ناموفق - انتظار..."
+                echo "Attempt $attempt failed - retrying..."
                 sleep 10
               fi
             done
@@ -246,18 +192,18 @@ jobs:
           done
           
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+        shell: bash
 
-      - name: اطلاع‌رسانی موفقیت به Worker
+      # 11. اطلاع‌رسانی موفقیت‌آمیز بودن عملیات به Worker
+      - name: Notify Worker - Job Completed
+        if: success()
         run: |
-          REPO_JSON=$(cat <<'ENDJSON'
-          {"owner":"${{ github.repository_owner }}","repo":"${{ github.event.repository.name }}"}
-          ENDJSON
-          )
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-complete" \
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"branch\":\"${{ env.BRANCH_NAME }}\",\"repo_info\":\"{\\\"owner\\\":\\\"${{ github.repository_owner }}\\\",\\\"repo\\\":\\\"${{ github.event.repository.name }}\\\"}\"}"
 
-      - name: اطلاع‌رسانی خطا به Worker
+      # 12. اطلاع‌رسانی خطا در صورت شکست
+      - name: Notify Worker - Job Failed
         if: failure()
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-failed" \
