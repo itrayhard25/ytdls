@@ -23,7 +23,7 @@ on:
       worker_url:
         description: 'آدرس Cloudflare Worker یوتیوپیا'
         required: false
-        default: 'https://ytdls.itray25.workers.dev'
+        default: 'https://your-youtopia-worker.workers.dev'
         type: string
 
 permissions:
@@ -50,6 +50,22 @@ jobs:
           pip install yt-dlp --quiet
           echo "✅ ابزارها نصب شدند"
 
+      # ----- NEW STEP: ساخت فایل کوکی از Secret -----
+      - name: ایجاد فایل کوکی برای yt-dlp
+        env:
+          COOKIE_BASE64: ${{ secrets.YT_COOKIES }}
+        run: |
+          if [ -z "$COOKIE_BASE64" ]; then
+            echo "⚠️ هشدار: Secret مربوط به کوکی (YT_COOKIES) تنظیم نشده!"
+            echo "بدون کوکی ادامه می‌دهیم ولی احتمال خطای احراز هویت وجود دارد."
+          else
+            echo "$COOKIE_BASE64" | base64 -d > cookies.txt
+            echo "✅ فایل کوکی ساخته شد"
+            # اطمینان از فرمت درست (خط اول # Netscape ...)
+            head -1 cookies.txt | grep -q "#" || echo "# Netscape HTTP Cookie File" | cat - cookies.txt > temp && mv temp cookies.txt
+          fi
+        shell: bash
+
       - name: بررسی کیفیت مناسب بر اساس محدودیت حجم
         id: quality
         env:
@@ -58,8 +74,11 @@ jobs:
         run: |
           echo "🔍 بررسی فرمت‌های موجود..."
           
-          # دریافت اطلاعات فرمت‌ها
-          FORMAT_INFO=$(yt-dlp --list-formats "$YT_URL" 2>&1 || echo "ERROR")
+          # اضافه کردن کوکی در صورت وجود فایل
+          COOKIE_ARG=""
+          [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
+          
+          FORMAT_INFO=$(yt-dlp $COOKIE_ARG --list-formats "$YT_URL" 2>&1 || echo "ERROR")
           if echo "$FORMAT_INFO" | grep -q "ERROR"; then
             echo "❌ خطا در دریافت اطلاعات ویدیو"
             echo "selected_quality=480" >> $GITHUB_ENV
@@ -68,10 +87,9 @@ jobs:
           
           MAX_BYTES=$((${MAX_SIZE_MB:-2048} * 1024 * 1024))
           
-          # تلاش برای کیفیت‌های مختلف از بالا به پایین (حداکثر 720p)
           for QUALITY in 720 480 360 240 144; do
             echo "⚙️ بررسی کیفیت ${QUALITY}p..."
-            SIZE_INFO=$(yt-dlp --format "bestvideo[height<=${QUALITY}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${QUALITY}][ext=mp4]/best[height<=${QUALITY}]" \
+            SIZE_INFO=$(yt-dlp $COOKIE_ARG --format "bestvideo[height<=${QUALITY}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${QUALITY}][ext=mp4]/best[height<=${QUALITY}]" \
               --print "%(filesize,filesize_approx)s" \
               "$YT_URL" 2>/dev/null || echo "0")
             
@@ -89,10 +107,10 @@ jobs:
             fi
           done
           
-          # اگر هیچ کیفیتی انتخاب نشد، از پایین‌ترین استفاده کن
           if [ -z "${{ env.selected_quality }}" ]; then
-            echo "selected_quality=360" >> $GITHUB_ENV
+            echo "selected_quality=144" >> $GITHUB_ENV
           fi
+        shell: bash
 
       - name: Notify Worker - شروع دانلود
         run: |
@@ -107,7 +125,11 @@ jobs:
         run: |
           echo "🎬 دانلود با کیفیت ${SELECTED_QUALITY}p..."
           
+          COOKIE_ARG=""
+          [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
+          
           yt-dlp \
+            $COOKIE_ARG \
             --format "bestvideo[height<=${SELECTED_QUALITY}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${SELECTED_QUALITY}][ext=mp4]/best[height<=${SELECTED_QUALITY}]" \
             --merge-output-format mp4 \
             --output "video.%(ext)s" \
@@ -128,7 +150,9 @@ jobs:
           echo "✅ دانلود کامل شد: $VIDEO_FILE ($(( FILE_SIZE / 1024 / 1024 )) MB)"
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
           echo "VIDEO_SIZE=$FILE_SIZE" >> $GITHUB_ENV
+        shell: bash
 
+      # بقیه مراحل بدون تغییر (فشرده‌سازی، آپلود، اطلاع‌رسانی)
       - name: Notify Worker - شروع فشرده‌سازی
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
@@ -167,7 +191,6 @@ jobs:
           total=${#chunks[@]}
           
           if [ $total -eq 0 ]; then
-            # فایل کوچک‌تر از ۹۵ مگابایت - بدون تقسیم
             chunks=(archive.7z)
             total=1
           fi
