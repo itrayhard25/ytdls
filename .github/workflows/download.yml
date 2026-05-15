@@ -15,8 +15,30 @@ on:
         description: 'شناسه کاربر تلگرام'
         required: true
         type: string
+      desired_quality:
+        description: 'کیفیت مورد نظر (مثلاً 720)'
+        required: false
+        default: '720'
+        type: choice
+        options:
+          - '2160'
+          - '1440'
+          - '1080'
+          - '720'
+          - '480'
+          - '360'
+      min_quality:
+        description: 'حداقل کیفیت قابل قبول (اگه کیفیت بالا حجمش زیاد باشه)'
+        required: false
+        default: '480'
+        type: choice
+        options:
+          - '720'
+          - '480'
+          - '360'
+          - '240'
       max_size_mb:
-        description: 'حداکثر حجم فایل (مگابایت) برای انتخاب کیفیت'
+        description: 'حداکثر حجم فایل (مگابایت)'
         required: false
         default: '2048'
         type: string
@@ -33,82 +55,85 @@ jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      # 1. اعلان شروع کار
       - name: Notify Worker - Job Started
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-started" \
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\"}" || true
 
-      # 2. دریافت سورس
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 3. نصب خودکار yt-dlp + FFmpeg + JavaScript runtime (بدون کوکی)
       - name: Setup yt-dlp & FFmpeg & JS Runtime
         uses: AnimMouse/setup-yt-dlp@v3
 
-      # 4. ایجاد فایل کوکی از Secret (دستی)
       - name: Create cookies file from secret
         env:
           COOKIE_BASE64: ${{ secrets.YOUTUBE_COOKIES }}
         run: |
           if [ -z "$COOKIE_BASE64" ]; then
             echo "⚠️ هشدار: Secret مربوط به کوکی (YOUTUBE_COOKIES) تنظیم نشده!"
-            echo "بدون کوکی ادامه می‌دهیم ولی احتمال خطای احراز هویت وجود دارد."
           else
             echo "$COOKIE_BASE64" | base64 -d > cookies.txt
-            echo "✅ فایل کوکی ساخته شد (در مسیر $PWD/cookies.txt)"
+            echo "✅ فایل کوکی ساخته شد"
           fi
         shell: bash
 
-      # 5. بررسی کیفیت بر اساس حجم
-      - name: Select Video Quality Based on Size Limit
+      - name: Select Final Quality (desired → min)
         id: quality
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           MAX_SIZE_MB: ${{ github.event.inputs.max_size_mb }}
+          DESIRED_Q: ${{ github.event.inputs.desired_quality }}
+          MIN_Q: ${{ github.event.inputs.min_quality }}
         run: |
-          echo "🔍 در حال بررسی فرمت‌های موجود..."
+          echo "🎯 کیفیت درخواستی: ${DESIRED_Q}p"
+          echo "🔻 حداقل قابل قبول: ${MIN_Q}p"
           
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
-          FORMAT_INFO=$(yt-dlp $COOKIE_ARG --list-formats "$YT_URL" 2>&1 || echo "ERROR")
-          if echo "$FORMAT_INFO" | grep -q "ERROR"; then
-            echo "❌ خطا در دریافت اطلاعات ویدیو. کیفیت 480p انتخاب شد."
-            echo "selected_quality=480" >> $GITHUB_ENV
-            exit 0
-          fi
-          
           MAX_BYTES=$((${MAX_SIZE_MB:-2048} * 1024 * 1024))
           
-          for QUALITY in 720 480 360 ; do
-            echo "⚙️ در حال بررسی کیفیت ${QUALITY}p..."
-            SIZE_INFO=$(yt-dlp $COOKIE_ARG --format "bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]" \
+          # لیست کیفیت‌ها از DESIRED_Q تا MIN_Q (مرتب نزولی)
+          QUALITIES=()
+          for q in 2160 1440 1080 720 480 360 240 144; do
+            if [ $q -le $DESIRED_Q ] && [ $q -ge $MIN_Q ]; then
+              QUALITIES+=($q)
+            fi
+          done
+          
+          SELECTED=""
+          for q in "${QUALITIES[@]}"; do
+            echo "⚙️ بررسی کیفیت ${q}p ..."
+            SIZE_INFO=$(yt-dlp $COOKIE_ARG \
+              --format "bestvideo[height<=${q}]+bestaudio/best[height<=${q}]" \
               --print "%(filesize,filesize_approx)s" \
               "$YT_URL" 2>/dev/null || echo "0")
             
             FILE_SIZE=$(echo "$SIZE_INFO" | head -1 | tr -d '[:space:]')
-            if [ -z "$FILE_SIZE" ] || [ "$FILE_SIZE" = "NA" ] || [ "$FILE_SIZE" = "None" ]; then
-              FILE_SIZE=0
-            fi
+            [ -z "$FILE_SIZE" ] || [ "$FILE_SIZE" = "NA" ] || [ "$FILE_SIZE" = "None" ] && FILE_SIZE=0
             
-            echo "   حجم تخمینی ${QUALITY}p: $FILE_SIZE بایت"
+            echo "   حجم تخمینی: $FILE_SIZE بایت (حد مجاز: $MAX_BYTES بایت)"
             
             if [ "$FILE_SIZE" -eq 0 ] || [ "$FILE_SIZE" -le "$MAX_BYTES" ]; then
-              echo "✅ کیفیت ${QUALITY}p انتخاب شد (حجم: $FILE_SIZE بایت)"
-              echo "selected_quality=$QUALITY" >> $GITHUB_ENV
+              echo "✅ کیفیت ${q}p انتخاب شد."
+              SELECTED=$q
               break
+            else
+              echo "❌ حجم بیش از حد مجاز، رفتن به کیفیت پایین‌تر..."
             fi
           done
           
-          if [ -z "${{ env.selected_quality }}" ]; then
-            echo "selected_quality=144" >> $GITHUB_ENV
+          if [ -z "$SELECTED" ]; then
+            echo "⚠️ هیچ کیفیتی در بازه ${MIN_Q}p تا ${DESIRED_Q}p کمتر از حجم مجاز نبود."
+            echo "برای جلوگیری از خطا، کیفیت ${MIN_Q}p رو دانلود می‌کنیم (ممکنه حجمش زیاد باشه)."
+            SELECTED=$MIN_Q
           fi
+          
+          echo "selected_quality=$SELECTED" >> $GITHUB_ENV
         shell: bash
 
-      # 6. دانلود ویدیو با صدا
       - name: Download YouTube Video
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
@@ -131,34 +156,28 @@ jobs:
             "$YT_URL"
           
           VIDEO_FILE=$(ls video.* 2>/dev/null | head -1)
-          if [ -z "$VIDEO_FILE" ]; then
-            echo "❌ فایل ویدیو یافت نشد!"
-            exit 1
-          fi
+          [ -z "$VIDEO_FILE" ] && { echo "❌ فایل ویدیو یافت نشد!"; exit 1; }
           
           FILE_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
-          echo "✅ دانلود کامل شد: $VIDEO_FILE ($(( FILE_SIZE / 1024 / 1024 )) MB)"
+          echo "✅ دانلود کامل: $VIDEO_FILE ($(( FILE_SIZE / 1024 / 1024 )) MB)"
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
           echo "VIDEO_SIZE=$FILE_SIZE" >> $GITHUB_ENV
         shell: bash
 
-      # 7. فشرده‌سازی
+      # --- بقیه مراحل فشرده‌سازی و آپلود بدون تغییر ---
       - name: Compress Video with Password
         run: |
           7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=1 -v95m "archive.7z" "${{ env.VIDEO_FILE }}"
           echo "✅ فشرده‌سازی کامل شد"
 
-      # 8. حذف فایل اصلی
       - name: Remove Original Video File
         run: rm -f "${{ env.VIDEO_FILE }}"
 
-      # 9. پیکربندی git
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # 10. آپلود تکه‌ای
       - name: Create Branch & Upload Chunks
         id: upload
         run: |
@@ -170,15 +189,10 @@ jobs:
           
           chunks=(archive.7z.*)
           total=${#chunks[@]}
-          
-          if [ $total -eq 0 ]; then
-            chunks=(archive.7z)
-            total=1
-          fi
+          [ $total -eq 0 ] && { chunks=(archive.7z); total=1; }
           
           batch_size=2
           start=0
-          
           while [ $start -lt $total ]; do
             end=$((start + batch_size - 1))
             [ $end -ge $total ] && end=$((total - 1))
@@ -188,28 +202,19 @@ jobs:
             git add README.md
             git commit -m "Add chunks $((start+1))-$((end+1)) of $total"
             for attempt in {1..5}; do
-              if git push origin "$BRANCH_NAME"; then
-                echo "Push successful"
-                break
-              else
-                echo "Attempt $attempt failed - retrying..."
-                sleep 10
-              fi
+              if git push origin "$BRANCH_NAME"; then break; else sleep 10; fi
             done
             
             PERCENT=$((70 + (end + 1) * 30 / total))
             curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
               -H "Content-Type: application/json" \
               -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"upload\",\"percent\":$PERCENT}" || true
-            
             start=$((end + 1))
             sleep 2
           done
-          
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
         shell: bash
 
-      # 11. اطلاع‌رسانی موفقیت
       - name: Notify Worker - Job Completed
         if: success()
         run: |
@@ -217,7 +222,6 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"branch\":\"${{ env.BRANCH_NAME }}\",\"repo_info\":\"{\\\"owner\\\":\\\"${{ github.repository_owner }}\\\",\\\"repo\\\":\\\"${{ github.event.repository.name }}\\\"}\"}"
 
-      # 12. اطلاع‌رسانی خطا
       - name: Notify Worker - Job Failed
         if: failure()
         run: |
