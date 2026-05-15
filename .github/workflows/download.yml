@@ -44,16 +44,21 @@ jobs:
         with:
           fetch-depth: 1
 
-      # --- مرحله نصب سریع (بدون apt-get اضافی) ---
-      - name: نصب سریع yt-dlp
+      # --- مرحله نصب سریع yt-dlp و Deno ---
+      - name: نصب yt-dlp و Deno
         run: |
-          # ffmpeg و p7zip-full از قبل روی رانر هستند، فقط yt-dlp رو دانلود می‌کنیم
+          # نصب Deno (موتور جاوااسکریپت برای حل چالش‌های یوتیوب)
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+          
+          # نصب yt-dlp (سریع، از طریق دانلود مستقیم)
           sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
-          echo "✅ yt-dlp نصب شد (نسخه $(yt-dlp --version))"
+          
+          echo "✅ yt-dlp و Deno نصب شدند"
         shell: bash
 
-      # --- ایجاد فایل کوکی از Secret (بدون چک فرمت اضافی) ---
+      # --- ایجاد فایل کوکی از Secret ---
       - name: ایجاد فایل کوکی برای yt-dlp
         env:
           COOKIE_BASE64: ${{ secrets.YT_COOKIES }}
@@ -78,7 +83,10 @@ jobs:
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
-          FORMAT_INFO=$(yt-dlp $COOKIE_ARG --list-formats "$YT_URL" 2>&1 || echo "ERROR")
+          # --- اضافه شدن تنظیمات Deno به yt-dlp ---
+          YTDL_OPTIONS="--js-runtimes deno --remote-components ejs:npm"
+          
+          FORMAT_INFO=$(yt-dlp $COOKIE_ARG $YTDL_OPTIONS --list-formats "$YT_URL" 2>&1 || echo "ERROR")
           if echo "$FORMAT_INFO" | grep -q "ERROR"; then
             echo "❌ خطا در دریافت اطلاعات ویدیو"
             echo "selected_quality=480" >> $GITHUB_ENV
@@ -89,7 +97,7 @@ jobs:
           
           for QUALITY in 720 480 360 240 144; do
             echo "⚙️ بررسی کیفیت ${QUALITY}p..."
-            SIZE_INFO=$(yt-dlp $COOKIE_ARG --format "bestvideo[height<=${QUALITY}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${QUALITY}][ext=mp4]/best[height<=${QUALITY}]" \
+            SIZE_INFO=$(yt-dlp $COOKIE_ARG $YTDL_OPTIONS --format "bestvideo[height<=${QUALITY}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${QUALITY}][ext=mp4]/best[height<=${QUALITY}]" \
               --print "%(filesize,filesize_approx)s" \
               "$YT_URL" 2>/dev/null || echo "0")
             
@@ -128,8 +136,12 @@ jobs:
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
+          # --- اضافه شدن تنظیمات Deno به yt-dlp ---
+          YTDL_OPTIONS="--js-runtimes deno --remote-components ejs:npm"
+          
           yt-dlp \
             $COOKIE_ARG \
+            $YTDL_OPTIONS \
             --format "bestvideo[height<=${SELECTED_QUALITY}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${SELECTED_QUALITY}][ext=mp4]/best[height<=${SELECTED_QUALITY}]" \
             --merge-output-format mp4 \
             --output "video.%(ext)s" \
