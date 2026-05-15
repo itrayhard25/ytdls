@@ -33,28 +33,36 @@ jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      # 1. اعلان شروع کار به Worker
+      # 1. اعلان شروع کار
       - name: Notify Worker - Job Started
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-started" \
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\"}" || true
 
-      # 2. دریافت سورس کد
+      # 2. دریافت سورس
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 3. نصب و راه‌اندازی خودکار yt-dlp با تمام ابزارهای مورد نیاز
+      # 3. نصب خودکار yt-dlp + FFmpeg + JavaScript runtime (بدون کوکی)
       - name: Setup yt-dlp & FFmpeg & JS Runtime
         uses: AnimMouse/setup-yt-dlp@v3
 
-      # 4. تنظیم و بارگذاری خودکار کوکی‌ها (در صورت وجود در Secrets)
-      - name: Setup YouTube Cookies
-        uses: AnimMouse/setup-yt-dlp/cookies@v3
-        with:
-          cookies: ${{ secrets.YOUTUBE_COOKIES }}
+      # 4. ایجاد فایل کوکی از Secret (دستی)
+      - name: Create cookies file from secret
+        env:
+          COOKIE_BASE64: ${{ secrets.YOUTUBE_COOKIES }}
+        run: |
+          if [ -z "$COOKIE_BASE64" ]; then
+            echo "⚠️ هشدار: Secret مربوط به کوکی (YOUTUBE_COOKIES) تنظیم نشده!"
+            echo "بدون کوکی ادامه می‌دهیم ولی احتمال خطای احراز هویت وجود دارد."
+          else
+            echo "$COOKIE_BASE64" | base64 -d > cookies.txt
+            echo "✅ فایل کوکی ساخته شد (در مسیر $PWD/cookies.txt)"
+          fi
+        shell: bash
 
-      # 5. بررسی کیفیت مناسب بر اساس محدودیت حجم
+      # 5. بررسی کیفیت بر اساس حجم
       - name: Select Video Quality Based on Size Limit
         id: quality
         env:
@@ -63,7 +71,10 @@ jobs:
         run: |
           echo "🔍 در حال بررسی فرمت‌های موجود..."
           
-          FORMAT_INFO=$(yt-dlp --list-formats "$YT_URL" 2>&1 || echo "ERROR")
+          COOKIE_ARG=""
+          [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
+          
+          FORMAT_INFO=$(yt-dlp $COOKIE_ARG --list-formats "$YT_URL" 2>&1 || echo "ERROR")
           if echo "$FORMAT_INFO" | grep -q "ERROR"; then
             echo "❌ خطا در دریافت اطلاعات ویدیو. کیفیت 480p انتخاب شد."
             echo "selected_quality=480" >> $GITHUB_ENV
@@ -74,7 +85,7 @@ jobs:
           
           for QUALITY in 720 480 360 240 144; do
             echo "⚙️ در حال بررسی کیفیت ${QUALITY}p..."
-            SIZE_INFO=$(yt-dlp --format "bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]" \
+            SIZE_INFO=$(yt-dlp $COOKIE_ARG --format "bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]" \
               --print "%(filesize,filesize_approx)s" \
               "$YT_URL" 2>/dev/null || echo "0")
             
@@ -97,7 +108,7 @@ jobs:
           fi
         shell: bash
 
-      # 6. دانلود ویدیو با بهترین فرمت صدا و تصویر
+      # 6. دانلود ویدیو با صدا
       - name: Download YouTube Video
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
@@ -105,7 +116,11 @@ jobs:
         run: |
           echo "🎬 دانلود با کیفیت ${SELECTED_QUALITY}p..."
           
+          COOKIE_ARG=""
+          [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
+          
           yt-dlp \
+            $COOKIE_ARG \
             --format "bestvideo[height<=${SELECTED_QUALITY}]+bestaudio/best[height<=${SELECTED_QUALITY}]" \
             --merge-output-format mp4 \
             --output "video.%(ext)s" \
@@ -127,23 +142,23 @@ jobs:
           echo "VIDEO_SIZE=$FILE_SIZE" >> $GITHUB_ENV
         shell: bash
 
-      # 7. فشرده‌سازی فایل نهایی با رمز
+      # 7. فشرده‌سازی
       - name: Compress Video with Password
         run: |
           7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=1 -v95m "archive.7z" "${{ env.VIDEO_FILE }}"
           echo "✅ فشرده‌سازی کامل شد"
 
-      # 8. حذف فایل اصلی برای ذخیره‌سازی بهتر
+      # 8. حذف فایل اصلی
       - name: Remove Original Video File
         run: rm -f "${{ env.VIDEO_FILE }}"
 
-      # 9. پیکربندی Git
+      # 9. پیکربندی git
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # 10. ایجاد یک شاخه‌ی جدید و آپلود قطعات فایل فشرده
+      # 10. آپلود تکه‌ای
       - name: Create Branch & Upload Chunks
         id: upload
         run: |
@@ -194,7 +209,7 @@ jobs:
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
         shell: bash
 
-      # 11. اطلاع‌رسانی موفقیت‌آمیز بودن عملیات به Worker
+      # 11. اطلاع‌رسانی موفقیت
       - name: Notify Worker - Job Completed
         if: success()
         run: |
@@ -202,7 +217,7 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"branch\":\"${{ env.BRANCH_NAME }}\",\"repo_info\":\"{\\\"owner\\\":\\\"${{ github.repository_owner }}\\\",\\\"repo\\\":\\\"${{ github.event.repository.name }}\\\"}\"}"
 
-      # 12. اطلاع‌رسانی خطا در صورت شکست
+      # 12. اطلاع‌رسانی خطا
       - name: Notify Worker - Job Failed
         if: failure()
         run: |
