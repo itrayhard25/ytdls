@@ -45,7 +45,7 @@ jobs:
           fetch-depth: 1
 
       # --- نصب ابزارها و سرور PO Token ---
-      - name: نصب yt-dlp شبانه، Node.js و راه‌اندازی سرور PO Token
+      - name: نصب yt-dlp، Node.js و راه‌اندازی سرور PO Token
         run: |
           curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
           sudo apt-get install -y nodejs
@@ -56,12 +56,11 @@ jobs:
           npx tsc
           node build/server.js &
           sleep 5
-          # بررسی سلامت سرور - اگر آماده بود متغیر را فعال می‌کنیم
           if curl -s --max-time 5 http://localhost:4416; then
             echo "✅ سرور PO Token فعال است"
             echo "PO_SERVER_READY=true" >> $GITHUB_ENV
           else
-            echo "⚠️ سرور PO Token آماده نشد - به حالت پشتیبان android_vr می‌رویم"
+            echo "⚠️ سرور PO Token آماده نشد - استفاده از android_vr"
             echo "PO_SERVER_READY=false" >> $GITHUB_ENV
           fi
         shell: bash
@@ -90,16 +89,13 @@ jobs:
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
-          # انتخاب تنظیمات بسته به آماده بودن سرور PO Token
           if [ "$PO_SERVER_READY" = "true" ]; then
-            POT_ARG="--extractor-args youtube:pot-provider=bgutil:http"
+            POT_ARG='--extractor-args "youtube:pot-provider=bgutil:http"'
           else
-            POT_ARG="--extractor-args \"youtube:player_client=android_vr\""
+            POT_ARG='--extractor-args "youtube:player_client=android_vr"'
           fi
           
-          YTDL_OPTIONS="$POT_ARG --js-runtimes node --remote-components ejs:npm"
-          
-          FORMAT_INFO=$(yt-dlp $COOKIE_ARG $YTDL_OPTIONS --list-formats "$YT_URL" 2>&1 || echo "ERROR")
+          FORMAT_INFO=$(yt-dlp $COOKIE_ARG $POT_ARG --js-runtimes node --remote-components ejs:npm --list-formats "$YT_URL" 2>&1 || echo "ERROR")
           if echo "$FORMAT_INFO" | grep -q "ERROR"; then
             echo "❌ خطا در دریافت اطلاعات ویدیو"
             echo "selected_quality=480" >> $GITHUB_ENV
@@ -109,7 +105,8 @@ jobs:
           MAX_BYTES=$((${MAX_SIZE_MB:-2048} * 1024 * 1024))
           for QUALITY in 720 480 360 240 144; do
             echo "⚙️ بررسی کیفیت ${QUALITY}p..."
-            SIZE_INFO=$(yt-dlp $COOKIE_ARG $YTDL_OPTIONS --format "bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]" \
+            SIZE_INFO=$(yt-dlp $COOKIE_ARG $POT_ARG --js-runtimes node --remote-components ejs:npm \
+              --format "bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]" \
               --print "%(filesize,filesize_approx)s" \
               "$YT_URL" 2>/dev/null || echo "0")
             FILE_SIZE=$(echo "$SIZE_INFO" | head -1 | tr -d '[:space:]')
@@ -141,16 +138,16 @@ jobs:
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
           if [ "$PO_SERVER_READY" = "true" ]; then
-            POT_ARG="--extractor-args youtube:pot-provider=bgutil:http"
+            POT_ARG='--extractor-args "youtube:pot-provider=bgutil:http"'
           else
-            POT_ARG="--extractor-args \"youtube:player_client=android_vr\""
+            POT_ARG='--extractor-args "youtube:player_client=android_vr"'
           fi
-          
-          YTDL_OPTIONS="$POT_ARG --js-runtimes node --remote-components ejs:npm"
           
           yt-dlp \
             $COOKIE_ARG \
-            $YTDL_OPTIONS \
+            $POT_ARG \
+            --js-runtimes node \
+            --remote-components ejs:npm \
             --format "bestvideo[height<=${SELECTED_QUALITY}]+bestaudio/best[height<=${SELECTED_QUALITY}]" \
             --merge-output-format mp4 \
             --output "video.%(ext)s" \
@@ -168,7 +165,7 @@ jobs:
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
         shell: bash
 
-      # --- بقیه مراحل بدون تغییر (فشرده‌سازی، آپلود و اطلاع‌رسانی) ---
+      # --- مراحل فشرده‌سازی، آپلود و اطلاع‌رسانی (بدون تغییر) ---
       - name: Notify Worker - شروع فشرده‌سازی
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
