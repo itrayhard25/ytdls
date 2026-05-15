@@ -44,25 +44,13 @@ jobs:
         with:
           fetch-depth: 1
 
-      # --- نصب ابزارها و سرور PO Token ---
-      - name: نصب yt-dlp، Node.js و راه‌اندازی سرور PO Token
+      # --- نصب yt-dlp و Node.js (بدون راه‌اندازی سرور PO Token برای سادگی) ---
+      - name: نصب yt-dlp و Node.js
         run: |
           curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
           sudo apt-get install -y nodejs
           python3 -m pip install -U --pre "yt-dlp[default]"
-          git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git
-          cd bgutil-ytdlp-pot-provider/server/
-          npm ci
-          npx tsc
-          node build/server.js &
-          sleep 5
-          if curl -s --max-time 5 http://localhost:4416; then
-            echo "✅ سرور PO Token فعال است"
-            echo "PO_SERVER_READY=true" >> $GITHUB_ENV
-          else
-            echo "⚠️ سرور PO Token آماده نشد - استفاده از android_vr"
-            echo "PO_SERVER_READY=false" >> $GITHUB_ENV
-          fi
+          echo "✅ yt-dlp و Node.js نصب شدند"
         shell: bash
 
       # --- ایجاد فایل کوکی ---
@@ -83,17 +71,13 @@ jobs:
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           MAX_SIZE_MB: ${{ github.event.inputs.max_size_mb }}
-          PO_SERVER_READY: ${{ env.PO_SERVER_READY }}
         run: |
           echo "🔍 بررسی فرمت‌های موجود..."
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
-          if [ "$PO_SERVER_READY" = "true" ]; then
-            POT_ARG='--extractor-args "youtube:pot-provider=bgutil:http"'
-          else
-            POT_ARG='--extractor-args "youtube:player_client=android_vr"'
-          fi
+          # تنظیمات extractor (بدون هیچ دابل‌کوت اضافی)
+          POT_ARG="--extractor-args youtube:player_client=android_vr"
           
           FORMAT_INFO=$(yt-dlp $COOKIE_ARG $POT_ARG --js-runtimes node --remote-components ejs:npm --list-formats "$YT_URL" 2>&1 || echo "ERROR")
           if echo "$FORMAT_INFO" | grep -q "ERROR"; then
@@ -131,17 +115,13 @@ jobs:
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           SELECTED_QUALITY: ${{ env.selected_quality }}
-          PO_SERVER_READY: ${{ env.PO_SERVER_READY }}
         run: |
           echo "🎬 دانلود با کیفیت ${SELECTED_QUALITY}p..."
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
-          if [ "$PO_SERVER_READY" = "true" ]; then
-            POT_ARG='--extractor-args "youtube:pot-provider=bgutil:http"'
-          else
-            POT_ARG='--extractor-args "youtube:player_client=android_vr"'
-          fi
+          # تنظیمات extractor بدون دابل‌کوت اضافی
+          POT_ARG="--extractor-args youtube:player_client=android_vr"
           
           yt-dlp \
             $COOKIE_ARG \
@@ -165,7 +145,7 @@ jobs:
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
         shell: bash
 
-      # --- مراحل فشرده‌سازی، آپلود و اطلاع‌رسانی (بدون تغییر) ---
+      # --- بقیه مراحل بدون تغییر ---
       - name: Notify Worker - شروع فشرده‌سازی
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
