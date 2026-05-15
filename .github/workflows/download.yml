@@ -44,26 +44,17 @@ jobs:
         with:
           fetch-depth: 1
 
-      # --- نصب yt-dlp، Deno و اطمینان از وجود ffmpeg ---
-      - name: نصب yt-dlp و Deno و بررسی ffmpeg
+      # --- نصب yt-dlp با pip (بهترین روش) + نصب Deno ---
+      - name: نصب yt-dlp (با pip) و Deno
         run: |
-          # نصب Deno
+          # نصب yt-dlp با pip به همراه افزونه‌های پیش‌فرض (شامل EJS scripts برای حل چالش‌ها)
+          python3 -m pip install -U "yt-dlp[default]"
+          
+          # نصب Deno (موتور جاوااسکریپت برای حل n challenge)
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
           
-          # نصب yt-dlp
-          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-          sudo chmod a+rx /usr/local/bin/yt-dlp
-          
-          # اطمینان از وجود ffmpeg (در صورت نبود، نصب سریع)
-          if ! command -v ffmpeg &> /dev/null; then
-            echo "ffmpeg پیدا نشد، در حال نصب..."
-            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-          else
-            echo "ffmpeg از قبل نصب است."
-          fi
-          
-          echo "✅ همه ابزارها حاضرند"
+          echo "✅ yt-dlp و Deno نصب شدند"
         shell: bash
 
       # --- ایجاد فایل کوکی از Secret ---
@@ -91,8 +82,8 @@ jobs:
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
-          # تنظیمات Deno برای حل چالش‌های یوتیوب
-          YTDL_OPTIONS="--js-runtimes deno --remote-components ejs:npm"
+          # فعال‌سازی موتور جاوااسکریپت Deno برای تمام دستورات yt-dlp
+          export YTDL_OPTIONS="--js-runtimes deno --remote-components ejs:npm"
           
           FORMAT_INFO=$(yt-dlp $COOKIE_ARG $YTDL_OPTIONS --list-formats "$YT_URL" 2>&1 || echo "ERROR")
           if echo "$FORMAT_INFO" | grep -q "ERROR"; then
@@ -105,7 +96,6 @@ jobs:
           
           for QUALITY in 720 480 360 240 144; do
             echo "⚙️ بررسی کیفیت ${QUALITY}p..."
-            # *** تغییر فرمت: بدون پسوند اجباری، تا شانس ادغام بالا بره ***
             SIZE_INFO=$(yt-dlp $COOKIE_ARG $YTDL_OPTIONS --format "bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]" \
               --print "%(filesize,filesize_approx)s" \
               "$YT_URL" 2>/dev/null || echo "0")
@@ -145,9 +135,9 @@ jobs:
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
+          # تنظیمات ضروری برای عبور از n challenge
           YTDL_OPTIONS="--js-runtimes deno --remote-components ejs:npm"
           
-          # *** کلید اصلی: فرمت ساده و قدرتمند که همیشه ویدیو+صدا رو ادغام کنه ***
           yt-dlp \
             $COOKIE_ARG \
             $YTDL_OPTIONS \
@@ -173,7 +163,7 @@ jobs:
           echo "VIDEO_SIZE=$FILE_SIZE" >> $GITHUB_ENV
         shell: bash
 
-      # ادامه مراحل بدون تغییر...
+      # --- ادامه مراحل (بدون تغییر) ---
       - name: Notify Worker - شروع فشرده‌سازی
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
