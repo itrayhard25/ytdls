@@ -44,13 +44,16 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: نصب ابزارهای مورد نیاز
+      # --- مرحله نصب سریع (بدون apt-get اضافی) ---
+      - name: نصب سریع yt-dlp
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full ffmpeg
-          pip install yt-dlp --quiet
-          echo "✅ ابزارها نصب شدند"
+          # ffmpeg و p7zip-full از قبل روی رانر هستند، فقط yt-dlp رو دانلود می‌کنیم
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+          echo "✅ yt-dlp نصب شد (نسخه $(yt-dlp --version))"
+        shell: bash
 
-      # ----- NEW STEP: ساخت فایل کوکی از Secret -----
+      # --- ایجاد فایل کوکی از Secret (بدون چک فرمت اضافی) ---
       - name: ایجاد فایل کوکی برای yt-dlp
         env:
           COOKIE_BASE64: ${{ secrets.YT_COOKIES }}
@@ -61,8 +64,6 @@ jobs:
           else
             echo "$COOKIE_BASE64" | base64 -d > cookies.txt
             echo "✅ فایل کوکی ساخته شد"
-            # اطمینان از فرمت درست (خط اول # Netscape ...)
-            head -1 cookies.txt | grep -q "#" || echo "# Netscape HTTP Cookie File" | cat - cookies.txt > temp && mv temp cookies.txt
           fi
         shell: bash
 
@@ -74,7 +75,6 @@ jobs:
         run: |
           echo "🔍 بررسی فرمت‌های موجود..."
           
-          # اضافه کردن کوکی در صورت وجود فایل
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
@@ -152,7 +152,6 @@ jobs:
           echo "VIDEO_SIZE=$FILE_SIZE" >> $GITHUB_ENV
         shell: bash
 
-      # بقیه مراحل بدون تغییر (فشرده‌سازی، آپلود، اطلاع‌رسانی)
       - name: Notify Worker - شروع فشرده‌سازی
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
