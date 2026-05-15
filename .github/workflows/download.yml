@@ -83,7 +83,7 @@ jobs:
           
           MAX_BYTES=$((${MAX_SIZE_MB:-2048} * 1024 * 1024))
           
-          for QUALITY in 720 480 360 240 144; do
+          for QUALITY in 720 480 360 ; do
             echo "⚙️ در حال بررسی کیفیت ${QUALITY}p..."
             SIZE_INFO=$(yt-dlp $COOKIE_ARG --format "bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]" \
               --print "%(filesize,filesize_approx)s" \
