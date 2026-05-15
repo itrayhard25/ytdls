@@ -23,7 +23,7 @@ on:
       worker_url:
         description: 'آدرس Cloudflare Worker یوتیوپیا'
         required: false
-        default: 'https://your-youtopia-worker.workers.dev'
+        default: 'https://ytdls.itray25.workers.dev'
         type: string
 
 permissions:
