@@ -23,7 +23,7 @@ on:
       worker_url:
         description: 'آدرس Cloudflare Worker یوتیوپیا'
         required: false
-        default: 'https://ytdls.itray25.workers.dev'
+        default: 'https://your-youtopia-worker.workers.dev'
         type: string
 
 permissions:
@@ -44,76 +44,66 @@ jobs:
         with:
           fetch-depth: 1
 
-      # --- نصب yt-dlp با pip (بهترین روش) + نصب Deno ---
-      - name: نصب yt-dlp (با pip) و Deno
+      - name: نصب yt-dlp، Node.js و راه‌اندازی سرور PO Token
         run: |
-          # نصب yt-dlp با pip به همراه افزونه‌های پیش‌فرض (شامل EJS scripts برای حل چالش‌ها)
-          python3 -m pip install -U "yt-dlp[default]"
-          
-          # نصب Deno (موتور جاوااسکریپت برای حل n challenge)
-          curl -fsSL https://deno.land/install.sh | sh
-          echo "$HOME/.deno/bin" >> $GITHUB_PATH
-          
-          echo "✅ yt-dlp و Deno نصب شدند"
+          curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+          python3 -m pip install -U --pre "yt-dlp[default]"
+          git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git
+          cd bgutil-ytdlp-pot-provider/server/
+          npm ci
+          npx tsc
+          node build/server.js &
+          sleep 5
+          curl -s --max-time 5 http://localhost:4416 || echo "⚠️ هشدار: سرور PO Token هنوز آماده نشد"
+          echo "✅ همه ابزارها نصب و سرور PO Token اجرا شد"
         shell: bash
 
-      # --- ایجاد فایل کوکی از Secret ---
-      - name: ایجاد فایل کوکی برای yt-dlp
+      - name: ایجاد فایل کوکی
         env:
           COOKIE_BASE64: ${{ secrets.YT_COOKIES }}
         run: |
           if [ -z "$COOKIE_BASE64" ]; then
-            echo "⚠️ هشدار: Secret مربوط به کوکی (YT_COOKIES) تنظیم نشده!"
-            echo "بدون کوکی ادامه می‌دهیم ولی احتمال خطای احراز هویت وجود دارد."
+            echo "⚠️ کوکی تنظیم نشده - دانلود ممکن است شکست بخورد"
           else
             echo "$COOKIE_BASE64" | base64 -d > cookies.txt
             echo "✅ فایل کوکی ساخته شد"
           fi
         shell: bash
 
-      - name: بررسی کیفیت مناسب بر اساس محدودیت حجم
+      - name: بررسی کیفیت بر اساس حجم
         id: quality
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           MAX_SIZE_MB: ${{ github.event.inputs.max_size_mb }}
         run: |
           echo "🔍 بررسی فرمت‌های موجود..."
-          
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
-          
-          # فعال‌سازی موتور جاوااسکریپت Deno برای تمام دستورات yt-dlp
-          export YTDL_OPTIONS="--js-runtimes deno --remote-components ejs:npm"
-          
+          YTDL_OPTIONS="--extractor-args \"youtubepot-bgutilhttp:base_url=http://localhost:4416\" --js-runtimes node --remote-components ejs:npm"
           FORMAT_INFO=$(yt-dlp $COOKIE_ARG $YTDL_OPTIONS --list-formats "$YT_URL" 2>&1 || echo "ERROR")
           if echo "$FORMAT_INFO" | grep -q "ERROR"; then
             echo "❌ خطا در دریافت اطلاعات ویدیو"
             echo "selected_quality=480" >> $GITHUB_ENV
             exit 0
           fi
-          
           MAX_BYTES=$((${MAX_SIZE_MB:-2048} * 1024 * 1024))
-          
           for QUALITY in 720 480 360 240 144; do
             echo "⚙️ بررسی کیفیت ${QUALITY}p..."
             SIZE_INFO=$(yt-dlp $COOKIE_ARG $YTDL_OPTIONS --format "bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]" \
               --print "%(filesize,filesize_approx)s" \
               "$YT_URL" 2>/dev/null || echo "0")
-            
             FILE_SIZE=$(echo "$SIZE_INFO" | head -1 | tr -d '[:space:]')
             if [ -z "$FILE_SIZE" ] || [ "$FILE_SIZE" = "NA" ] || [ "$FILE_SIZE" = "None" ]; then
               FILE_SIZE=0
             fi
-            
             echo "   حجم تخمینی ${QUALITY}p: $FILE_SIZE بایت"
-            
             if [ "$FILE_SIZE" -eq 0 ] || [ "$FILE_SIZE" -le "$MAX_BYTES" ]; then
               echo "✅ کیفیت ${QUALITY}p انتخاب شد (حجم: $FILE_SIZE بایت)"
               echo "selected_quality=$QUALITY" >> $GITHUB_ENV
               break
             fi
           done
-          
           if [ -z "${{ env.selected_quality }}" ]; then
             echo "selected_quality=144" >> $GITHUB_ENV
           fi
@@ -131,13 +121,9 @@ jobs:
           SELECTED_QUALITY: ${{ env.selected_quality }}
         run: |
           echo "🎬 دانلود با کیفیت ${SELECTED_QUALITY}p..."
-          
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
-          
-          # تنظیمات ضروری برای عبور از n challenge
-          YTDL_OPTIONS="--js-runtimes deno --remote-components ejs:npm"
-          
+          YTDL_OPTIONS="--extractor-args \"youtubepot-bgutilhttp:base_url=http://localhost:4416\" --js-runtimes node --remote-components ejs:npm"
           yt-dlp \
             $COOKIE_ARG \
             $YTDL_OPTIONS \
@@ -150,20 +136,16 @@ jobs:
             --fragment-retries 5 \
             --retry-sleep 5 \
             "$YT_URL"
-          
           VIDEO_FILE=$(ls video.* 2>/dev/null | head -1)
           if [ -z "$VIDEO_FILE" ]; then
             echo "❌ فایل ویدیو یافت نشد!"
             exit 1
           fi
-          
           FILE_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
           echo "✅ دانلود کامل شد: $VIDEO_FILE ($(( FILE_SIZE / 1024 / 1024 )) MB)"
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
-          echo "VIDEO_SIZE=$FILE_SIZE" >> $GITHUB_ENV
         shell: bash
 
-      # --- ادامه مراحل (بدون تغییر) ---
       - name: Notify Worker - شروع فشرده‌سازی
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
@@ -195,20 +177,15 @@ jobs:
           BRANCH_NAME="yt_${{ github.event.inputs.user_id }}_$(date +%s)"
           git checkout --orphan "$BRANCH_NAME"
           git rm -rf . 2>/dev/null || true
-          
           echo "# YouTube Download for user ${{ github.event.inputs.user_id }}" > README.md
-          
           chunks=(archive.7z.*)
           total=${#chunks[@]}
-          
           if [ $total -eq 0 ]; then
             chunks=(archive.7z)
             total=1
           fi
-          
           batch_size=2
           start=0
-          
           while [ $start -lt $total ]; do
             end=$((start + batch_size - 1))
             [ $end -ge $total ] && end=$((total - 1))
@@ -226,16 +203,13 @@ jobs:
                 sleep 10
               fi
             done
-            
             PERCENT=$((70 + (end + 1) * 30 / total))
             curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
               -H "Content-Type: application/json" \
               -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"upload\",\"percent\":$PERCENT}" || true
-            
             start=$((end + 1))
             sleep 2
           done
-          
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
 
       - name: اطلاع‌رسانی موفقیت به Worker
