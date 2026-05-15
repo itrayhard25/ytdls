@@ -110,7 +110,7 @@ jobs:
           fi
 
           # بررسی کیفیت مناسب (حداکثر 720p)
-          for QUALITY in 720 480 360 240; do
+          for QUALITY in 720 480; do
             echo "📏 بررسی حجم ${QUALITY}p..."
             
             SIZE=$(yt-dlp \
@@ -137,7 +137,7 @@ jobs:
           done
 
           if [ -z "$SELECTED_QUALITY" ]; then
-            echo "SELECTED_QUALITY=360" >> $GITHUB_ENV
+            echo "SELECTED_QUALITY=480" >> $GITHUB_ENV
           fi
 
       - name: اطلاع پیشرفت - شروع دانلود
@@ -163,7 +163,7 @@ jobs:
           yt-dlp \
             --extractor-args "youtube:player_client=${WORKING_CLIENT}" \
             $COOKIE_FLAG \
-            --format "bestvideo[height<=${SELECTED_QUALITY}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${SELECTED_QUALITY}][ext=mp4]/best[height<=${SELECTED_QUALITY}]" \
+            --format "bestvideo[height<=${SELECTED_QUALITY}][height>=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${SELECTED_QUALITY}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${SELECTED_QUALITY}][height>=480]/best[height<=${SELECTED_QUALITY}]" \
             --merge-output-format mp4 \
             --output "video.%(ext)s" \
             --no-playlist \
@@ -176,7 +176,7 @@ jobs:
           yt-dlp \
             --extractor-args "youtube:player_client=ios" \
             $COOKIE_FLAG \
-            --format "best[height<=${SELECTED_QUALITY}]/best" \
+            --format "best[height<=${SELECTED_QUALITY}][height>=480]/best[height<=${SELECTED_QUALITY}]/best" \
             --output "video.%(ext)s" \
             --no-playlist \
             --retries 3 \
