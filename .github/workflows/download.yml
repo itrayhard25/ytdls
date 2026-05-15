@@ -44,13 +44,36 @@ jobs:
         with:
           fetch-depth: 1
 
-      # --- نصب yt-dlp و Node.js (بدون راه‌اندازی سرور PO Token برای سادگی) ---
-      - name: نصب yt-dlp و Node.js
+      # --- نصب yt-dlp، Node.js و راه‌اندازی صحیح سرور bgutil ---
+      - name: نصب ابزارها و سرور PO Token
         run: |
+          # ۱. Node.js
           curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
           sudo apt-get install -y nodejs
+
+          # ۲. yt-dlp نسخه شبانه
           python3 -m pip install -U --pre "yt-dlp[default]"
-          echo "✅ yt-dlp و Node.js نصب شدند"
+
+          # ۳. کلون و نصب bgutil
+          git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git
+          cd bgutil-ytdlp-pot-provider/server
+          npm ci
+
+          # کامپایل TypeScript با npx tsc (مطمئن شویم فایل build/server.js ساخته شود)
+          npx tsc --project tsconfig.json || npx tsc
+
+          # ۴. راه‌اندازی سرور
+          node build/server.js &
+          sleep 5
+
+          # ۵. تست سلامت
+          if curl -s --max-time 5 http://localhost:4416; then
+            echo "✅ سرور PO Token فعال است"
+            echo "PO_SERVER_READY=true" >> $GITHUB_ENV
+          else
+            echo "⚠️ سرور PO Token راه‌اندازی نشد - خروج از workflow"
+            exit 1
+          fi
         shell: bash
 
       # --- ایجاد فایل کوکی ---
@@ -60,6 +83,7 @@ jobs:
         run: |
           if [ -z "$COOKIE_BASE64" ]; then
             echo "⚠️ کوکی تنظیم نشده"
+            exit 1
           else
             echo "$COOKIE_BASE64" | base64 -d > cookies.txt
             echo "✅ فایل کوکی ساخته شد"
@@ -76,8 +100,8 @@ jobs:
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
-          # تنظیمات extractor (بدون هیچ دابل‌کوت اضافی)
-          POT_ARG="--extractor-args youtube:player_client=android_vr"
+          # استفاده از PO Token از طریق سرور محلی
+          POT_ARG="--extractor-args youtube:pot-provider=bgutil:http"
           
           FORMAT_INFO=$(yt-dlp $COOKIE_ARG $POT_ARG --js-runtimes node --remote-components ejs:npm --list-formats "$YT_URL" 2>&1 || echo "ERROR")
           if echo "$FORMAT_INFO" | grep -q "ERROR"; then
@@ -120,8 +144,8 @@ jobs:
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
-          # تنظیمات extractor بدون دابل‌کوت اضافی
-          POT_ARG="--extractor-args youtube:player_client=android_vr"
+          # استفاده از PO Token
+          POT_ARG="--extractor-args youtube:pot-provider=bgutil:http"
           
           yt-dlp \
             $COOKIE_ARG \
@@ -145,7 +169,7 @@ jobs:
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
         shell: bash
 
-      # --- بقیه مراحل بدون تغییر ---
+      # --- مراحل فشرده‌سازی، آپلود و اطلاع‌رسانی (بدون تغییر) ---
       - name: Notify Worker - شروع فشرده‌سازی
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
