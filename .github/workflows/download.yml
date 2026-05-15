@@ -44,66 +44,56 @@ jobs:
         with:
           fetch-depth: 1
 
-      # --- نصب yt-dlp، Node.js و راه‌اندازی صحیح سرور bgutil ---
-      - name: نصب ابزارها و سرور PO Token
+      # --- نصب yt-dlp، Deno و اطمینان از وجود ffmpeg ---
+      - name: نصب yt-dlp، Deno و بررسی ffmpeg
         run: |
-          # ۱. Node.js
-          curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-          sudo apt-get install -y nodejs
-
-          # ۲. yt-dlp نسخه شبانه
-          python3 -m pip install -U --pre "yt-dlp[default]"
-
-          # ۳. کلون و نصب bgutil
-          git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git
-          cd bgutil-ytdlp-pot-provider/server
-          npm ci
-
-          # کامپایل TypeScript با npx tsc (مطمئن شویم فایل build/server.js ساخته شود)
-          npx tsc --project tsconfig.json || npx tsc
-
-          # ۴. راه‌اندازی سرور
-          node build/server.js &
-          sleep 5
-
-          # ۵. تست سلامت
-          if curl -s --max-time 5 http://localhost:4416; then
-            echo "✅ سرور PO Token فعال است"
-            echo "PO_SERVER_READY=true" >> $GITHUB_ENV
+          # نصب Deno
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+          
+          # نصب yt-dlp
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+          
+          # اطمینان از وجود ffmpeg (در صورت نبود، نصب سریع)
+          if ! command -v ffmpeg &> /dev/null; then
+            echo "ffmpeg پیدا نشد، در حال نصب..."
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
           else
-            echo "⚠️ سرور PO Token راه‌اندازی نشد - خروج از workflow"
-            exit 1
+            echo "ffmpeg از قبل نصب است."
           fi
+          
+          echo "✅ همه ابزارها حاضرند"
         shell: bash
 
-      # --- ایجاد فایل کوکی ---
-      - name: ایجاد فایل کوکی
+      # --- ایجاد فایل کوکی از Secret ---
+      - name: ایجاد فایل کوکی برای yt-dlp
         env:
           COOKIE_BASE64: ${{ secrets.YT_COOKIES }}
         run: |
           if [ -z "$COOKIE_BASE64" ]; then
-            echo "⚠️ کوکی تنظیم نشده"
-            exit 1
+            echo "⚠️ هشدار: Secret مربوط به کوکی (YT_COOKIES) تنظیم نشده!"
+            echo "بدون کوکی ادامه می‌دهیم ولی احتمال خطای احراز هویت وجود دارد."
           else
             echo "$COOKIE_BASE64" | base64 -d > cookies.txt
             echo "✅ فایل کوکی ساخته شد"
           fi
         shell: bash
 
-      - name: بررسی کیفیت بر اساس حجم
+      - name: بررسی کیفیت مناسب بر اساس محدودیت حجم
         id: quality
         env:
           YT_URL: ${{ github.event.inputs.youtube_url }}
           MAX_SIZE_MB: ${{ github.event.inputs.max_size_mb }}
         run: |
           echo "🔍 بررسی فرمت‌های موجود..."
+          
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
-          # استفاده از PO Token از طریق سرور محلی
-          POT_ARG="--extractor-args youtube:pot-provider=bgutil:http"
+          YTDL_OPTIONS="--js-runtimes deno --remote-components ejs:npm"
           
-          FORMAT_INFO=$(yt-dlp $COOKIE_ARG $POT_ARG --js-runtimes node --remote-components ejs:npm --list-formats "$YT_URL" 2>&1 || echo "ERROR")
+          FORMAT_INFO=$(yt-dlp $COOKIE_ARG $YTDL_OPTIONS --list-formats "$YT_URL" 2>&1 || echo "ERROR")
           if echo "$FORMAT_INFO" | grep -q "ERROR"; then
             echo "❌ خطا در دریافت اطلاعات ویدیو"
             echo "selected_quality=480" >> $GITHUB_ENV
@@ -111,22 +101,31 @@ jobs:
           fi
           
           MAX_BYTES=$((${MAX_SIZE_MB:-2048} * 1024 * 1024))
+          
           for QUALITY in 720 480 360 240 144; do
             echo "⚙️ بررسی کیفیت ${QUALITY}p..."
-            SIZE_INFO=$(yt-dlp $COOKIE_ARG $POT_ARG --js-runtimes node --remote-components ejs:npm \
-              --format "bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]" \
+            # *** تغییر: فرمت ساده و انعطاف‌پذیر بدون پسوند اجباری ***
+            SIZE_INFO=$(yt-dlp $COOKIE_ARG $YTDL_OPTIONS --format "bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}]" \
               --print "%(filesize,filesize_approx)s" \
               "$YT_URL" 2>/dev/null || echo "0")
+            
             FILE_SIZE=$(echo "$SIZE_INFO" | head -1 | tr -d '[:space:]')
-            [ -z "$FILE_SIZE" ] || [ "$FILE_SIZE" = "NA" ] || [ "$FILE_SIZE" = "None" ] && FILE_SIZE=0
+            if [ -z "$FILE_SIZE" ] || [ "$FILE_SIZE" = "NA" ] || [ "$FILE_SIZE" = "None" ]; then
+              FILE_SIZE=0
+            fi
+            
             echo "   حجم تخمینی ${QUALITY}p: $FILE_SIZE بایت"
+            
             if [ "$FILE_SIZE" -eq 0 ] || [ "$FILE_SIZE" -le "$MAX_BYTES" ]; then
-              echo "✅ کیفیت ${QUALITY}p انتخاب شد"
+              echo "✅ کیفیت ${QUALITY}p انتخاب شد (حجم: $FILE_SIZE بایت)"
               echo "selected_quality=$QUALITY" >> $GITHUB_ENV
               break
             fi
           done
-          [ -z "${{ env.selected_quality }}" ] && echo "selected_quality=144" >> $GITHUB_ENV
+          
+          if [ -z "${{ env.selected_quality }}" ]; then
+            echo "selected_quality=144" >> $GITHUB_ENV
+          fi
         shell: bash
 
       - name: Notify Worker - شروع دانلود
@@ -141,17 +140,16 @@ jobs:
           SELECTED_QUALITY: ${{ env.selected_quality }}
         run: |
           echo "🎬 دانلود با کیفیت ${SELECTED_QUALITY}p..."
+          
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
           
-          # استفاده از PO Token
-          POT_ARG="--extractor-args youtube:pot-provider=bgutil:http"
+          YTDL_OPTIONS="--js-runtimes deno --remote-components ejs:npm"
           
+          # *** اصلاحیه: فرمت استاندارد که همیشه ویدیو+صدا را ادغام می‌کند ***
           yt-dlp \
             $COOKIE_ARG \
-            $POT_ARG \
-            --js-runtimes node \
-            --remote-components ejs:npm \
+            $YTDL_OPTIONS \
             --format "bestvideo[height<=${SELECTED_QUALITY}]+bestaudio/best[height<=${SELECTED_QUALITY}]" \
             --merge-output-format mp4 \
             --output "video.%(ext)s" \
@@ -163,13 +161,18 @@ jobs:
             "$YT_URL"
           
           VIDEO_FILE=$(ls video.* 2>/dev/null | head -1)
-          [ -z "$VIDEO_FILE" ] && { echo "❌ فایل ویدیو یافت نشد!"; exit 1; }
-          FILE_SIZE=$(stat -c%s "$VIDEO_FILE")
+          if [ -z "$VIDEO_FILE" ]; then
+            echo "❌ فایل ویدیو یافت نشد!"
+            exit 1
+          fi
+          
+          FILE_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
           echo "✅ دانلود کامل شد: $VIDEO_FILE ($(( FILE_SIZE / 1024 / 1024 )) MB)"
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
+          echo "VIDEO_SIZE=$FILE_SIZE" >> $GITHUB_ENV
         shell: bash
 
-      # --- مراحل فشرده‌سازی، آپلود و اطلاع‌رسانی (بدون تغییر) ---
+      # --- ادامه مراحل (بدون تغییر) ---
       - name: Notify Worker - شروع فشرده‌سازی
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
@@ -201,12 +204,20 @@ jobs:
           BRANCH_NAME="yt_${{ github.event.inputs.user_id }}_$(date +%s)"
           git checkout --orphan "$BRANCH_NAME"
           git rm -rf . 2>/dev/null || true
+          
           echo "# YouTube Download for user ${{ github.event.inputs.user_id }}" > README.md
+          
           chunks=(archive.7z.*)
           total=${#chunks[@]}
-          [ $total -eq 0 ] && chunks=(archive.7z) && total=1
+          
+          if [ $total -eq 0 ]; then
+            chunks=(archive.7z)
+            total=1
+          fi
+          
           batch_size=2
           start=0
+          
           while [ $start -lt $total ]; do
             end=$((start + batch_size - 1))
             [ $end -ge $total ] && end=$((total - 1))
@@ -224,17 +235,24 @@ jobs:
                 sleep 10
               fi
             done
+            
             PERCENT=$((70 + (end + 1) * 30 / total))
             curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
               -H "Content-Type: application/json" \
               -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"upload\",\"percent\":$PERCENT}" || true
+            
             start=$((end + 1))
             sleep 2
           done
+          
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
 
       - name: اطلاع‌رسانی موفقیت به Worker
         run: |
+          REPO_JSON=$(cat <<'ENDJSON'
+          {"owner":"${{ github.repository_owner }}","repo":"${{ github.event.repository.name }}"}
+          ENDJSON
+          )
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-complete" \
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"branch\":\"${{ env.BRANCH_NAME }}\",\"repo_info\":\"{\\\"owner\\\":\\\"${{ github.repository_owner }}\\\",\\\"repo\\\":\\\"${{ github.event.repository.name }}\\\"}\"}"
