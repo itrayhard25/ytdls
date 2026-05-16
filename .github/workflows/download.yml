@@ -1,22 +1,49 @@
-name: Youtopia Download
+name: YouTube Download for Youtopia
 
 on:
   workflow_dispatch:
     inputs:
-      media_url:
-        description: 'لینک ویدیو'
+      youtube_url:
+        description: 'لینک ویدیوی یوتیوب'
         required: true
         type: string
       zip_password:
-        description: 'رمز فایل'
+        description: 'رمز فایل فشرده'
         required: true
         type: string
       user_id:
-        description: 'شناسه کاربر'
+        description: 'شناسه کاربر تلگرام'
         required: true
         type: string
+      desired_quality:
+        description: 'کیفیت مورد نظر (مثلاً 720)'
+        required: false
+        default: '720'
+        type: choice
+        options:
+          - '2160'
+          - '1440'
+          - '1080'
+          - '720'
+          - '480'
+          - '360'
+      min_quality:
+        description: 'حداقل کیفیت قابل قبول (اگه کیفیت بالا حجمش زیاد باشه)'
+        required: false
+        default: '480'
+        type: choice
+        options:
+          - '720'
+          - '480'
+          - '360'
+          - '240'
+      max_size_mb:
+        description: 'حداکثر حجم فایل (مگابایت)'
+        required: false
+        default: '2048'
+        type: string
       worker_url:
-        description: 'آدرس Worker یوتیوپیا'
+        description: 'آدرس Cloudflare Worker یوتیوپیا'
         required: false
         default: 'https://ytdls.itray25.workers.dev'
         type: string
@@ -27,257 +54,175 @@ permissions:
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-
     steps:
-      - name: اطلاع شروع به Worker
+      - name: Notify Worker - Job Started
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-started" \
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\"}" || true
 
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: نصب ابزارها
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq p7zip-full ffmpeg python3-pip
+      - name: Setup yt-dlp & FFmpeg & JS Runtime
+        uses: AnimMouse/setup-yt-dlp@v3
 
-          # آخرین نسخه yt-dlp
-          pip install -U "yt-dlp[default]" --quiet
-
-          # نصب Deno برای JS runtime (حل bot detection)
-          curl -fsSL https://deno.land/install.sh | sh 2>/dev/null || true
-          export DENO_INSTALL="$HOME/.deno"
-          export PATH="$DENO_INSTALL/bin:$PATH"
-          echo "$HOME/.deno/bin" >> $GITHUB_PATH
-
-          echo "✅ ابزارها نصب شدند"
-          yt-dlp --version
-
-      - name: آماده‌سازی کوکی
+      - name: Create cookies file from secret
         env:
-          YOUTOPIA_COOKIES_B64: ${{ secrets.YOUTOPIA_COOKIES_B64 }}
+          COOKIE_BASE64: ${{ secrets.YOUTUBE_COOKIES }}
         run: |
-          if [ -n "$YOUTOPIA_COOKIES_B64" ]; then
-            echo "$YOUTOPIA_COOKIES_B64" | base64 -d > /tmp/cookies.txt
-            echo "HAS_COOKIES=1" >> $GITHUB_ENV
-            echo "✅ کوکی بارگذاری شد"
+          if [ -z "$COOKIE_BASE64" ]; then
+            echo "⚠️ هشدار: Secret مربوط به کوکی (YOUTUBE_COOKIES) تنظیم نشده!"
           else
-            echo "HAS_COOKIES=0" >> $GITHUB_ENV
-            echo "⚠️ کوکی تنظیم نشده - بدون کوکی ادامه می‌دهیم"
+            echo "$COOKIE_BASE64" | base64 -d > cookies.txt
+            echo "✅ فایل کوکی ساخته شد"
           fi
+        shell: bash
 
-      - name: بررسی و انتخاب بهترین کیفیت
+      - name: Select Final Quality (desired → min)
         id: quality
         env:
-          YT_URL: ${{ github.event.inputs.media_url }}
+          YT_URL: ${{ github.event.inputs.youtube_url }}
+          MAX_SIZE_MB: ${{ github.event.inputs.max_size_mb }}
+          DESIRED_Q: ${{ github.event.inputs.desired_quality }}
+          MIN_Q: ${{ github.event.inputs.min_quality }}
         run: |
-          export PATH="$HOME/.deno/bin:$PATH"
+          echo "🎯 کیفیت درخواستی: ${DESIRED_Q}p"
+          echo "🔻 حداقل قابل قبول: ${MIN_Q}p"
           
-          COOKIE_FLAG=""
-          if [ "$HAS_COOKIES" = "1" ]; then
-            COOKIE_FLAG="--cookies /tmp/cookies.txt"
-          fi
-
-          echo "🔍 بررسی فرمت‌های موجود..."
-
-          # تلاش با client های مختلف برای bypass bot detection
-          for CLIENT in "tv_simply" "ios" "android" "tv"; do
-            echo "⚙️ تلاش با client: $CLIENT"
-            
-            FORMAT_CHECK=$(yt-dlp \
-              --extractor-args "youtube:player_client=${CLIENT}" \
-              $COOKIE_FLAG \
-              --list-formats \
-              --no-warnings \
-              "$YT_URL" 2>&1 | head -5)
-            
-            if ! echo "$FORMAT_CHECK" | grep -qi "sign in\|bot\|error\|unavailable"; then
-              echo "✅ client کار می‌کند: $CLIENT"
-              echo "WORKING_CLIENT=$CLIENT" >> $GITHUB_ENV
-              break
+          COOKIE_ARG=""
+          [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
+          
+          MAX_BYTES=$((${MAX_SIZE_MB:-2048} * 1024 * 1024))
+          
+          # لیست کیفیت‌ها از DESIRED_Q تا MIN_Q (مرتب نزولی)
+          QUALITIES=()
+          for q in 2160 1440 1080 720 480 360 240 144; do
+            if [ $q -le $DESIRED_Q ] && [ $q -ge $MIN_Q ]; then
+              QUALITIES+=($q)
             fi
-            echo "❌ client $CLIENT کار نمی‌کند"
           done
-
-          if [ -z "$WORKING_CLIENT" ]; then
-            echo "WORKING_CLIENT=tv_simply" >> $GITHUB_ENV
-            echo "⚠️ هیچ client ای تایید نشد، از tv_simply استفاده می‌کنیم"
-          fi
-
-          # بررسی کیفیت مناسب (حداکثر 720p)
-          for QUALITY in 720 480; do
-            echo "📏 بررسی حجم ${QUALITY}p..."
-            
-            SIZE=$(yt-dlp \
-              --extractor-args "youtube:player_client=${WORKING_CLIENT}" \
-              $COOKIE_FLAG \
-              --format "bestvideo[height<=${QUALITY}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${QUALITY}]" \
+          
+          SELECTED=""
+          for q in "${QUALITIES[@]}"; do
+            echo "⚙️ بررسی کیفیت ${q}p ..."
+            SIZE_INFO=$(yt-dlp $COOKIE_ARG \
+              --format "bestvideo[height<=${q}]+bestaudio/best[height<=${q}]" \
               --print "%(filesize,filesize_approx)s" \
-              --no-warnings \
-              "$YT_URL" 2>/dev/null | head -1 | tr -d '[:space:]')
-
-            if [ -z "$SIZE" ] || [ "$SIZE" = "NA" ] || [ "$SIZE" = "None" ]; then
-              SIZE=0
-            fi
-
-            # حداکثر 1.8 گیگابایت (برای 7zip بعد از فشرده‌سازی)
-            MAX_BYTES=1932735283
-
-            if [ "$SIZE" -eq 0 ] || [ "$SIZE" -le "$MAX_BYTES" ] 2>/dev/null; then
-              echo "✅ کیفیت ${QUALITY}p انتخاب شد"
-              echo "SELECTED_QUALITY=$QUALITY" >> $GITHUB_ENV
+              "$YT_URL" 2>/dev/null || echo "0")
+            
+            FILE_SIZE=$(echo "$SIZE_INFO" | head -1 | tr -d '[:space:]')
+            [ -z "$FILE_SIZE" ] || [ "$FILE_SIZE" = "NA" ] || [ "$FILE_SIZE" = "None" ] && FILE_SIZE=0
+            
+            echo "   حجم تخمینی: $FILE_SIZE بایت (حد مجاز: $MAX_BYTES بایت)"
+            
+            if [ "$FILE_SIZE" -eq 0 ] || [ "$FILE_SIZE" -le "$MAX_BYTES" ]; then
+              echo "✅ کیفیت ${q}p انتخاب شد."
+              SELECTED=$q
               break
+            else
+              echo "❌ حجم بیش از حد مجاز، رفتن به کیفیت پایین‌تر..."
             fi
-            echo "⚠️ ${QUALITY}p حجمش زیاده ($SIZE بایت)"
           done
-
-          if [ -z "$SELECTED_QUALITY" ]; then
-            echo "SELECTED_QUALITY=480" >> $GITHUB_ENV
+          
+          if [ -z "$SELECTED" ]; then
+            echo "⚠️ هیچ کیفیتی در بازه ${MIN_Q}p تا ${DESIRED_Q}p کمتر از حجم مجاز نبود."
+            echo "برای جلوگیری از خطا، کیفیت ${MIN_Q}p رو دانلود می‌کنیم (ممکنه حجمش زیاد باشه)."
+            SELECTED=$MIN_Q
           fi
+          
+          echo "selected_quality=$SELECTED" >> $GITHUB_ENV
+        shell: bash
 
-      - name: اطلاع پیشرفت - شروع دانلود
-        run: |
-          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
-            -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"download\",\"percent\":10}" || true
-
-      - name: دانلود ویدیو
+      - name: Download YouTube Video
         env:
-          YT_URL: ${{ github.event.inputs.media_url }}
+          YT_URL: ${{ github.event.inputs.youtube_url }}
+          SELECTED_QUALITY: ${{ env.selected_quality }}
         run: |
-          export PATH="$HOME/.deno/bin:$PATH"
-
-          COOKIE_FLAG=""
-          if [ "$HAS_COOKIES" = "1" ]; then
-            COOKIE_FLAG="--cookies /tmp/cookies.txt"
-          fi
-
-          echo "🎬 دانلود با کیفیت ${SELECTED_QUALITY}p و client: ${WORKING_CLIENT}"
-
-          # تلاش اول با client انتخاب‌شده
+          echo "🎬 دانلود با کیفیت ${SELECTED_QUALITY}p..."
+          
+          COOKIE_ARG=""
+          [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
+          
           yt-dlp \
-            --extractor-args "youtube:player_client=${WORKING_CLIENT}" \
-            $COOKIE_FLAG \
-            --format "bestvideo[height<=${SELECTED_QUALITY}][height>=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${SELECTED_QUALITY}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${SELECTED_QUALITY}][height>=480]/best[height<=${SELECTED_QUALITY}]" \
+            $COOKIE_ARG \
+            --format "bestvideo[height<=${SELECTED_QUALITY}]+bestaudio/best[height<=${SELECTED_QUALITY}]" \
             --merge-output-format mp4 \
             --output "video.%(ext)s" \
             --no-playlist \
             --retries 5 \
             --fragment-retries 5 \
             --retry-sleep 5 \
-            --no-warnings \
-            "$YT_URL" || \
-          (echo "⚠️ تلاش دوم با ios..." && \
-          yt-dlp \
-            --extractor-args "youtube:player_client=ios" \
-            $COOKIE_FLAG \
-            --format "best[height<=${SELECTED_QUALITY}][height>=480]/best[height<=${SELECTED_QUALITY}]/best" \
-            --output "video.%(ext)s" \
-            --no-playlist \
-            --retries 3 \
-            "$YT_URL")
-
+            "$YT_URL"
+          
           VIDEO_FILE=$(ls video.* 2>/dev/null | head -1)
-          if [ -z "$VIDEO_FILE" ]; then
-            echo "❌ فایل ویدیو یافت نشد!"
-            exit 1
-          fi
-
+          [ -z "$VIDEO_FILE" ] && { echo "❌ فایل ویدیو یافت نشد!"; exit 1; }
+          
           FILE_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
           echo "✅ دانلود کامل: $VIDEO_FILE ($(( FILE_SIZE / 1024 / 1024 )) MB)"
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
+          echo "VIDEO_SIZE=$FILE_SIZE" >> $GITHUB_ENV
+        shell: bash
 
-      - name: اطلاع پیشرفت - فشرده‌سازی
+      # --- بقیه مراحل فشرده‌سازی و آپلود بدون تغییر ---
+      - name: Compress Video with Password
         run: |
-          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
-            -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"compress\",\"percent\":60}" || true
-
-      - name: فشرده‌سازی با رمز
-        run: |
-          7z a \
-            -p"${{ github.event.inputs.zip_password }}" \
-            -mhe=on \
-            -mx=1 \
-            -v95m \
-            "archive.7z" \
-            "${{ env.VIDEO_FILE }}"
-
-          ls -lh archive.7z* 2>/dev/null || ls -lh archive.7z
+          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=1 -v95m "archive.7z" "${{ env.VIDEO_FILE }}"
           echo "✅ فشرده‌سازی کامل شد"
-          rm -f "${{ env.VIDEO_FILE }}"
 
-      - name: پیکربندی git
+      - name: Remove Original Video File
+        run: rm -f "${{ env.VIDEO_FILE }}"
+
+      - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: اطلاع پیشرفت - آپلود
-        run: |
-          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
-            -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"upload\",\"percent\":70}" || true
-
-      - name: ایجاد branch و آپلود
+      - name: Create Branch & Upload Chunks
         id: upload
         run: |
           BRANCH_NAME="yt_${{ github.event.inputs.user_id }}_$(date +%s)"
           git checkout --orphan "$BRANCH_NAME"
           git rm -rf . 2>/dev/null || true
-
-          echo "# Youtopia download" > README.md
-
-          # آپلود فایل‌ها
-          CHUNKS=(archive.7z.*)
-          if [ ${#CHUNKS[@]} -eq 0 ] || [ ! -f "${CHUNKS[0]}" ]; then
-            CHUNKS=(archive.7z)
-          fi
-          TOTAL=${#CHUNKS[@]}
-
-          BATCH=2
-          START=0
-          while [ $START -lt $TOTAL ]; do
-            END=$((START + BATCH - 1))
-            [ $END -ge $TOTAL ] && END=$((TOTAL - 1))
-
-            for i in $(seq $START $END); do
-              git add "${CHUNKS[$i]}" 2>/dev/null || true
+          
+          echo "# YouTube Download for user ${{ github.event.inputs.user_id }}" > README.md
+          
+          chunks=(archive.7z.*)
+          total=${#chunks[@]}
+          [ $total -eq 0 ] && { chunks=(archive.7z); total=1; }
+          
+          batch_size=2
+          start=0
+          while [ $start -lt $total ]; do
+            end=$((start + batch_size - 1))
+            [ $end -ge $total ] && end=$((total - 1))
+            for i in $(seq $start $end); do
+              git add "${chunks[$i]}" 2>/dev/null || true
             done
             git add README.md
-
-            git commit -m "chunks $((START+1))-$((END+1))/$TOTAL"
-
+            git commit -m "Add chunks $((start+1))-$((end+1)) of $total"
             for attempt in {1..5}; do
-              git push origin "$BRANCH_NAME" && break
-              echo "تلاش $attempt ناموفق..."
-              sleep 10
+              if git push origin "$BRANCH_NAME"; then break; else sleep 10; fi
             done
-
-            PERCENT=$((70 + (END + 1) * 28 / TOTAL))
+            
+            PERCENT=$((70 + (end + 1) * 30 / total))
             curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
               -H "Content-Type: application/json" \
               -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"upload\",\"percent\":$PERCENT}" || true
-
-            START=$((END + 1))
+            start=$((end + 1))
             sleep 2
           done
-
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
-          echo "✅ آپلود کامل شد: $BRANCH_NAME"
+        shell: bash
 
-      - name: اطلاع موفقیت به Worker
+      - name: Notify Worker - Job Completed
         if: success()
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-complete" \
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"branch\":\"${{ env.BRANCH_NAME }}\",\"repo_info\":\"{\\\"owner\\\":\\\"${{ github.repository_owner }}\\\",\\\"repo\\\":\\\"${{ github.event.repository.name }}\\\"}\"}"
 
-      - name: اطلاع خطا به Worker
+      - name: Notify Worker - Job Failed
         if: failure()
         run: |
           curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-failed" \
