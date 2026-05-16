@@ -1,9 +1,9 @@
-name: YouTube Download for Youtopia
+name: Youtopia Download
 
 on:
   workflow_dispatch:
     inputs:
-      youtube_url:
+      media_url:
         description: 'لینک ویدیوی یوتیوب'
         required: true
         type: string
@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       desired_quality:
-        description: 'کیفیت مورد نظر (مثلاً 720)'
+        description: 'کیفیت مورد نظر'
         required: false
         default: '720'
         type: choice
@@ -28,7 +28,7 @@ on:
           - '480'
           - '360'
       min_quality:
-        description: 'حداقل کیفیت قابل قبول (اگه کیفیت بالا حجمش زیاد باشه)'
+        description: 'حداقل کیفیت قابل قبول'
         required: false
         default: '480'
         type: choice
@@ -54,6 +54,7 @@ permissions:
 jobs:
   download:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Notify Worker - Job Started
         run: |
@@ -63,6 +64,8 @@ jobs:
 
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Setup yt-dlp & FFmpeg & JS Runtime
         uses: AnimMouse/setup-yt-dlp@v3
@@ -82,27 +85,26 @@ jobs:
       - name: Select Final Quality (desired → min)
         id: quality
         env:
-          YT_URL: ${{ github.event.inputs.youtube_url }}
+          YT_URL: ${{ github.event.inputs.media_url }}
           MAX_SIZE_MB: ${{ github.event.inputs.max_size_mb }}
           DESIRED_Q: ${{ github.event.inputs.desired_quality }}
           MIN_Q: ${{ github.event.inputs.min_quality }}
         run: |
           echo "🎯 کیفیت درخواستی: ${DESIRED_Q}p"
           echo "🔻 حداقل قابل قبول: ${MIN_Q}p"
-          
+
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
-          
+
           MAX_BYTES=$((${MAX_SIZE_MB:-2048} * 1024 * 1024))
-          
-          # لیست کیفیت‌ها از DESIRED_Q تا MIN_Q (مرتب نزولی)
+
           QUALITIES=()
           for q in 2160 1440 1080 720 480 360 240 144; do
             if [ $q -le $DESIRED_Q ] && [ $q -ge $MIN_Q ]; then
               QUALITIES+=($q)
             fi
           done
-          
+
           SELECTED=""
           for q in "${QUALITIES[@]}"; do
             echo "⚙️ بررسی کیفیت ${q}p ..."
@@ -110,12 +112,12 @@ jobs:
               --format "bestvideo[height<=${q}]+bestaudio/best[height<=${q}]" \
               --print "%(filesize,filesize_approx)s" \
               "$YT_URL" 2>/dev/null || echo "0")
-            
+
             FILE_SIZE=$(echo "$SIZE_INFO" | head -1 | tr -d '[:space:]')
             [ -z "$FILE_SIZE" ] || [ "$FILE_SIZE" = "NA" ] || [ "$FILE_SIZE" = "None" ] && FILE_SIZE=0
-            
+
             echo "   حجم تخمینی: $FILE_SIZE بایت (حد مجاز: $MAX_BYTES بایت)"
-            
+
             if [ "$FILE_SIZE" -eq 0 ] || [ "$FILE_SIZE" -le "$MAX_BYTES" ]; then
               echo "✅ کیفیت ${q}p انتخاب شد."
               SELECTED=$q
@@ -124,26 +126,32 @@ jobs:
               echo "❌ حجم بیش از حد مجاز، رفتن به کیفیت پایین‌تر..."
             fi
           done
-          
+
           if [ -z "$SELECTED" ]; then
             echo "⚠️ هیچ کیفیتی در بازه ${MIN_Q}p تا ${DESIRED_Q}p کمتر از حجم مجاز نبود."
-            echo "برای جلوگیری از خطا، کیفیت ${MIN_Q}p رو دانلود می‌کنیم (ممکنه حجمش زیاد باشه)."
+            echo "برای جلوگیری از خطا، کیفیت ${MIN_Q}p رو دانلود می‌کنیم."
             SELECTED=$MIN_Q
           fi
-          
+
           echo "selected_quality=$SELECTED" >> $GITHUB_ENV
         shell: bash
 
+      - name: Notify Worker - Progress Download Start
+        run: |
+          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"download\",\"percent\":10}" || true
+
       - name: Download YouTube Video
         env:
-          YT_URL: ${{ github.event.inputs.youtube_url }}
+          YT_URL: ${{ github.event.inputs.media_url }}
           SELECTED_QUALITY: ${{ env.selected_quality }}
         run: |
           echo "🎬 دانلود با کیفیت ${SELECTED_QUALITY}p..."
-          
+
           COOKIE_ARG=""
           [ -f cookies.txt ] && COOKIE_ARG="--cookies cookies.txt"
-          
+
           yt-dlp \
             $COOKIE_ARG \
             --format "bestvideo[height<=${SELECTED_QUALITY}]+bestaudio/best[height<=${SELECTED_QUALITY}]" \
@@ -154,29 +162,44 @@ jobs:
             --fragment-retries 5 \
             --retry-sleep 5 \
             "$YT_URL"
-          
+
           VIDEO_FILE=$(ls video.* 2>/dev/null | head -1)
           [ -z "$VIDEO_FILE" ] && { echo "❌ فایل ویدیو یافت نشد!"; exit 1; }
-          
+
           FILE_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
           echo "✅ دانلود کامل: $VIDEO_FILE ($(( FILE_SIZE / 1024 / 1024 )) MB)"
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
-          echo "VIDEO_SIZE=$FILE_SIZE" >> $GITHUB_ENV
         shell: bash
 
-      # --- بقیه مراحل فشرده‌سازی و آپلود بدون تغییر ---
+      - name: Notify Worker - Progress Compress
+        run: |
+          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"compress\",\"percent\":60}" || true
+
       - name: Compress Video with Password
         run: |
-          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=1 -v95m "archive.7z" "${{ env.VIDEO_FILE }}"
+          7z a \
+            -p"${{ github.event.inputs.zip_password }}" \
+            -mhe=on \
+            -mx=1 \
+            -v95m \
+            "archive.7z" \
+            "${{ env.VIDEO_FILE }}"
+          ls -lh archive.7z* 2>/dev/null || ls -lh archive.7z
           echo "✅ فشرده‌سازی کامل شد"
-
-      - name: Remove Original Video File
-        run: rm -f "${{ env.VIDEO_FILE }}"
+          rm -f "${{ env.VIDEO_FILE }}"
 
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Notify Worker - Progress Upload Start
+        run: |
+          curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"upload\",\"percent\":70}" || true
 
       - name: Create Branch & Upload Chunks
         id: upload
@@ -184,13 +207,13 @@ jobs:
           BRANCH_NAME="yt_${{ github.event.inputs.user_id }}_$(date +%s)"
           git checkout --orphan "$BRANCH_NAME"
           git rm -rf . 2>/dev/null || true
-          
-          echo "# YouTube Download for user ${{ github.event.inputs.user_id }}" > README.md
-          
+
+          echo "# Youtopia download" > README.md
+
           chunks=(archive.7z.*)
           total=${#chunks[@]}
           [ $total -eq 0 ] && { chunks=(archive.7z); total=1; }
-          
+
           batch_size=2
           start=0
           while [ $start -lt $total ]; do
@@ -200,19 +223,24 @@ jobs:
               git add "${chunks[$i]}" 2>/dev/null || true
             done
             git add README.md
-            git commit -m "Add chunks $((start+1))-$((end+1)) of $total"
+            git commit -m "chunks $((start+1))-$((end+1))/$total"
             for attempt in {1..5}; do
-              if git push origin "$BRANCH_NAME"; then break; else sleep 10; fi
+              git push origin "$BRANCH_NAME" && break
+              echo "تلاش $attempt ناموفق..."
+              sleep 10
             done
-            
-            PERCENT=$((70 + (end + 1) * 30 / total))
+
+            PERCENT=$((70 + (end + 1) * 28 / total))
             curl -s -X POST "${{ github.event.inputs.worker_url }}/api/yt-progress" \
               -H "Content-Type: application/json" \
               -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"stage\":\"upload\",\"percent\":$PERCENT}" || true
+
             start=$((end + 1))
             sleep 2
           done
+
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+          echo "✅ آپلود کامل شد: $BRANCH_NAME"
         shell: bash
 
       - name: Notify Worker - Job Completed
